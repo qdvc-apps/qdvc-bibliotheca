@@ -311,25 +311,66 @@ def _markup_to_html(markup: str) -> str:
     return f"<html><body>{markup}</body></html>"
 
 
-def _set_clipboard_rich(clip, plain_text: str, html: str) -> None:
-    """Set both text/plain and text/html targets on the clipboard."""
-    from gi.repository import Gtk as _Gtk
-    targets = _Gtk.TargetList.new([])
-    targets.add(Gdk.Atom.intern("text/html", False), 0, 0)
-    targets.add_text_targets(1)
-    entries = _Gtk.target_table_new_from_list(targets)
+# text/html target info id used in the target table below.
+_TARGET_HTML = 0
+_TARGET_TEXT = 1
 
-    def _get(_clip, selection, info, _data):
-        if info == 0:
-            data = html.encode("utf-8")
-            selection.set(Gdk.Atom.intern("text/html", False), 8, data)
+# Keep a strong reference to the owner so it is not garbage-collected while it
+# owns the clipboard; otherwise the "get" callback fires on freed memory
+# (which is what produced the `free(): invalid pointer` crash).
+_clipboard_owner = None
+
+
+class _ClipboardOwner(GObject.Object):
+    """A GObject that owns the clipboard and serves target data on request."""
+
+    def __init__(self, plain_text: str, html: str):
+        super().__init__()
+        self.plain_text = plain_text
+        self.html_bytes = html.encode("utf-8")
+
+    def get_func(self, _clipboard, selection_data, info, _user_data=None):
+        if info == _TARGET_HTML:
+            selection_data.set(
+                Gdk.Atom.intern("text/html", False), 8, self.html_bytes)
         else:
-            selection.set_text(plain_text, -1)
+            selection_data.set_text(self.plain_text, -1)
 
-    def _clear(_clip, _data):
+    def clear_func(self, _clipboard, _user_data=None):
         pass
 
-    ok = clip.set_with_data(entries, _get, _clear, None)
-    if not ok:
+
+def _set_clipboard_rich(clip, plain_text: str, html: str) -> None:
+    """Put both text/plain and text/html on the clipboard.
+
+    PyGObject does not expose ``Gtk.Clipboard.set_with_data`` (calling it
+    crashes the interpreter), so we use ``set_with_owner`` with a GObject we
+    keep alive, and fall back to plain text if that is unavailable.
+    """
+    global _clipboard_owner
+
+    targets = [
+        Gtk.TargetEntry.new("text/html", 0, _TARGET_HTML),
+        Gtk.TargetEntry.new("UTF8_STRING", 0, _TARGET_TEXT),
+        Gtk.TargetEntry.new("text/plain;charset=utf-8", 0, _TARGET_TEXT),
+        Gtk.TargetEntry.new("text/plain", 0, _TARGET_TEXT),
+        Gtk.TargetEntry.new("STRING", 0, _TARGET_TEXT),
+    ]
+
+    owner = _ClipboardOwner(plain_text, html)
+    ok = False
+    set_with_owner = getattr(clip, "set_with_owner", None)
+    if set_with_owner is not None:
+        try:
+            ok = set_with_owner(
+                targets, owner.get_func, owner.clear_func, owner)
+        except Exception:  # noqa: BLE001
+            ok = False
+
+    if ok:
+        # Retain the owner; releasing it would invalidate the callbacks.
+        _clipboard_owner = owner
+    else:
+        # Reliable fallback: plain text only (better than crashing).
         clip.set_text(plain_text, -1)
-    clip.store()
+        clip.store()

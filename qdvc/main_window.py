@@ -20,6 +20,7 @@ class MainWindow(Gtk.ApplicationWindow):
         w = self.config.window.get("width", 1100)
         h = self.config.window.get("height", 720)
         self.set_default_size(w, h)
+        self.set_position(Gtk.WindowPosition.CENTER)
         self.connect("delete-event", self._on_close)
 
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
