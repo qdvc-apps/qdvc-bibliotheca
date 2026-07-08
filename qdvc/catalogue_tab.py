@@ -16,6 +16,8 @@ class CatalogueTab(Gtk.Box):
     __gsignals__ = {
         # emitted when the user wants to programmatically reveal a record
         "record-activated": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
+        # emitted (bool has_selection) when the master selection changes
+        "selection-changed": (GObject.SignalFlags.RUN_FIRST, None, (bool,)),
     }
 
     def __init__(self):
@@ -23,63 +25,171 @@ class CatalogueTab(Gtk.Box):
         self.workspace = None
         self._current_record = None
         self._suppress_notes_save = False
+        self._autosave = True
+        # (kind, key) describing the active sidebar filter, for refresh.
+        self._active_filter = (NODE_ALL, "")
 
-        paned_outer = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
-        paned_inner = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
-        self.pack_start(paned_outer, True, True, 0)
+        self.paned_outer = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
+        self.paned_inner = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
+        self.pack_start(self.paned_outer, True, True, 0)
 
-        paned_outer.pack1(self._build_sidebar(), False, False)
-        paned_outer.pack2(paned_inner, True, False)
-        paned_inner.pack1(self._build_master(), True, False)
-        paned_inner.pack2(self._build_detail(), True, False)
+        self.sidebar_widget = self._build_sidebar()
+        self.detail_widget = self._build_detail()
+        self.paned_outer.pack1(self.sidebar_widget, False, False)
+        self.paned_outer.pack2(self.paned_inner, True, False)
+        self.paned_inner.pack1(self._build_master(), True, False)
+        self.paned_inner.pack2(self.detail_widget, True, False)
 
-        paned_outer.set_position(220)
-        paned_inner.set_position(430)
+        self.paned_outer.set_position(220)
+        self.paned_inner.set_position(430)
 
     # ------------------------------------------------------------------
     # Pane 1: sidebar
     # ------------------------------------------------------------------
     def _build_sidebar(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         sw = Gtk.ScrolledWindow()
         sw.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        # columns: label, kind, key
-        self.side_store = Gtk.TreeStore(str, str, str)
+        # columns: icon-name, label, kind, key
+        self.side_store = Gtk.TreeStore(str, str, str, str)
         self.side_view = Gtk.TreeView(model=self.side_store)
         self.side_view.set_headers_visible(False)
-        col = Gtk.TreeViewColumn("", Gtk.CellRendererText(), text=0)
+        col = Gtk.TreeViewColumn("")
+        icon_r = Gtk.CellRendererPixbuf()
+        text_r = Gtk.CellRendererText()
+        col.pack_start(icon_r, False)
+        col.pack_start(text_r, True)
+        col.add_attribute(icon_r, "icon-name", 0)
+        col.add_attribute(text_r, "text", 1)
         self.side_view.append_column(col)
         self.side_view.get_selection().connect("changed",
                                                self._on_sidebar_changed)
+        self.side_view.connect("row-activated", self._on_sidebar_activated)
         sw.add(self.side_view)
-        sw.set_size_request(200, -1)
-        return sw
+        box.pack_start(sw, True, True, 0)
+
+        # small action bar for My works management
+        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
+        self.add_work_btn = Gtk.Button.new_from_icon_name(
+            "list-add", Gtk.IconSize.SMALL_TOOLBAR)
+        self.add_work_btn.set_tooltip_text("New work\u2026")
+        self.add_work_btn.connect("clicked", self._on_add_work)
+        self.edit_work_btn = Gtk.Button.new_from_icon_name(
+            "document-edit", Gtk.IconSize.SMALL_TOOLBAR)
+        self.edit_work_btn.set_tooltip_text("Edit selected work\u2026")
+        self.edit_work_btn.connect("clicked", self._on_edit_selected_work)
+        bar.pack_start(self.add_work_btn, False, False, 0)
+        bar.pack_start(self.edit_work_btn, False, False, 0)
+        box.pack_start(bar, False, False, 0)
+
+        box.set_size_request(200, -1)
+        return box
 
     def _rebuild_sidebar(self):
         self.side_store.clear()
-        self.side_store.append(None, ["All articles", NODE_ALL, ""])
-        by_type = self.side_store.append(None, ["By type", "", ""])
+        self.side_store.append(
+            None, ["edit-select-all", "All articles", NODE_ALL, ""])
+        by_type = self.side_store.append(
+            None, ["view-list-symbolic", "By type", "", ""])
+        type_icons = {
+            "Journal article": "text-x-generic",
+            "Conference paper": "presentation",
+            "Book chapter": "x-office-document",
+            "Book": "accessories-dictionary",
+            "Webpage": "text-html",
+            "Other": "emblem-documents",
+        }
         for label in ["Journal article", "Conference paper", "Book chapter",
                       "Book", "Webpage", "Other"]:
-            self.side_store.append(by_type, [label, NODE_TYPE, label])
-        works = self.side_store.append(None, ["My works", "", ""])
+            self.side_store.append(
+                by_type, [type_icons.get(label, "text-x-generic"),
+                          label, NODE_TYPE, label])
+        works = self.side_store.append(
+            None, ["folder-documents", "My works", "", ""])
         if self.workspace:
             for key, work in sorted(self.workspace.my_works.items(),
                                     key=lambda kv: kv[1].name.lower()):
-                self.side_store.append(works, [work.name, NODE_WORK, key])
+                self.side_store.append(
+                    works, ["emblem-favorite", work.name, NODE_WORK, key])
         self.side_view.expand_all()
 
     def _on_sidebar_changed(self, selection):
         model, it = selection.get_selected()
         if not it:
             return
-        kind = model[it][1]
-        key = model[it][2]
+        kind = model[it][2]
+        key = model[it][3]
+        self._apply_filter(kind, key)
+
+    def _apply_filter(self, kind, key):
+        if not self.workspace:
+            return
         if kind == NODE_ALL:
+            self._active_filter = (NODE_ALL, "")
             self._populate_master(self.workspace.all_records())
         elif kind == NODE_TYPE:
+            self._active_filter = (NODE_TYPE, key)
             self._populate_master(self.workspace.records_by_type(key))
         elif kind == NODE_WORK:
+            self._active_filter = (NODE_WORK, key)
             self._populate_master(self.workspace.records_for_work(key))
+
+    def _on_sidebar_activated(self, _view, path, _col):
+        it = self.side_store.get_iter(path)
+        if self.side_store[it][2] == NODE_WORK:
+            self._edit_work(self.side_store[it][3])
+
+    def _selected_work_key(self):
+        model, it = self.side_view.get_selection().get_selected()
+        if it and model[it][2] == NODE_WORK:
+            return model[it][3]
+        return None
+
+    def _on_edit_selected_work(self, _btn):
+        key = self._selected_work_key()
+        if key:
+            self._edit_work(key)
+
+    def _on_add_work(self, _btn):
+        if not self.workspace:
+            return
+        dlg = Gtk.Dialog(title="New Work", transient_for=self.get_toplevel(),
+                         modal=True)
+        dlg.add_button("_Cancel", Gtk.ResponseType.CANCEL)
+        dlg.add_button("_Create", Gtk.ResponseType.OK)
+        dlg.set_default_response(Gtk.ResponseType.OK)
+        area = dlg.get_content_area()
+        area.set_border_width(10)
+        area.add(Gtk.Label(label="Name for the new work:", xalign=0))
+        entry = Gtk.Entry()
+        entry.set_activates_default(True)
+        area.add(entry)
+        dlg.show_all()
+        if dlg.run() == Gtk.ResponseType.OK:
+            name = entry.get_text().strip()
+            dlg.destroy()
+            if name:
+                work = self.workspace.create_my_work(name)
+                self._rebuild_sidebar()
+                self._edit_work_object(work)
+        else:
+            dlg.destroy()
+
+    def _edit_work(self, key):
+        work = self.workspace.my_works.get(key)
+        if work:
+            self._edit_work_object(work, key)
+
+    def _edit_work_object(self, work, key=None):
+        from .myworks_editor import MyWorkEditor
+        dlg = MyWorkEditor(self.get_toplevel(), self.workspace, work)
+        if dlg.run() == Gtk.ResponseType.OK:
+            dlg.apply()
+            self._rebuild_sidebar()
+            # if we are currently viewing this work, refresh the master list
+            if key and self._active_filter == (NODE_WORK, key):
+                self._populate_master(self.workspace.records_for_work(key))
+        dlg.destroy()
 
     # ------------------------------------------------------------------
     # Pane 2: master table
@@ -136,11 +246,16 @@ class CatalogueTab(Gtk.Box):
     def _on_master_changed(self, selection):
         model, it = selection.get_selected()
         if not it:
+            self._current_record = None
+            self.emit("selection-changed", False)
             return
         bid = model[it][0]
         rec = self.workspace.get(bid) if self.workspace else None
         if rec:
             self._show_detail(rec)
+            self.emit("selection-changed", True)
+        else:
+            self.emit("selection-changed", False)
 
     # ------------------------------------------------------------------
     # Pane 3: detail
@@ -237,6 +352,8 @@ class CatalogueTab(Gtk.Box):
         rec = getattr(self, "_current_record", None)
         if not rec or not getattr(self, "_notes_dirty", False):
             return
+        if not self._autosave:
+            return
         start, end = self.notes_buffer.get_bounds()
         body = self.notes_buffer.get_text(start, end, True)
         from pathlib import Path
@@ -277,6 +394,7 @@ class CatalogueTab(Gtk.Box):
         self.workspace = workspace
         self._current_record = None
         self._notes_dirty = False
+        self._active_filter = (NODE_ALL, "")
         self._rebuild_sidebar()
         if workspace:
             self._populate_master(workspace.all_records())
@@ -288,10 +406,12 @@ class CatalogueTab(Gtk.Box):
         self._suppress_notes_save = False
         self.detail_status.set_text("")
         self._set_detail_sensitive(False)
+        self.emit("selection-changed", False)
 
     def reveal_record(self, bibliotheca_id):
         """Select a record in the master table by id (used by DOI lookup)."""
         # Ensure "All articles" is the active filter so the row is present.
+        self._active_filter = (NODE_ALL, "")
         self._populate_master(self.workspace.all_records())
         for row in self.master_filter:
             if row[0] == bibliotheca_id:
@@ -300,6 +420,35 @@ class CatalogueTab(Gtk.Box):
                 self.master_view.scroll_to_cell(path, None, True, 0.5, 0)
                 return True
         return False
+
+    # --- public API used by the main window ---------------------------
+    def current_record(self):
+        return self._current_record
+
+    def flush_notes(self):
+        self._flush_notes()
+
+    def refresh_current_view(self):
+        kind, key = self._active_filter
+        self._apply_filter(kind, key)
+
+    def set_sidebar_visible(self, visible):
+        self.sidebar_widget.set_no_show_all(not visible)
+        self.sidebar_widget.set_visible(visible)
+
+    def set_detail_visible(self, visible):
+        self.detail_widget.set_no_show_all(not visible)
+        self.detail_widget.set_visible(visible)
+
+    def set_notes_font(self, font_str):
+        try:
+            self.notes_view.override_font(
+                Pango.FontDescription.from_string(font_str))
+        except Exception:  # noqa: BLE001
+            pass
+
+    def set_autosave(self, on):
+        self._autosave = bool(on)
 
 
 # ----------------------------------------------------------------------

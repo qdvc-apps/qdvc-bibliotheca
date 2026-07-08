@@ -1,14 +1,41 @@
-"""Main window: menu bar (File > Open/Close Workspace) + notebook tabs."""
+"""Main window: menubar + toolbar + notebook tabs."""
+
+import os
+import shlex
+import subprocess
+import sys
+from pathlib import Path
 
 import gi
 
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gtk, Gio  # noqa: E402
+from gi.repository import Gtk, Gdk, Gio  # noqa: E402
 
-from . import APP_NAME
+from . import APP_NAME, __version__
 from .workspace import Workspace
 from .catalogue_tab import CatalogueTab
 from .doi_tab import DoiLookupTab
+from .preferences import PreferencesDialog
+
+
+def _menu_item(label, icon_name=None):
+    """An image menu item built without the deprecated ImageMenuItem.
+
+    Uses a Box with a Gtk.Image + Gtk.AccelLabel inside a plain MenuItem.
+    """
+    item = Gtk.MenuItem()
+    box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+    if icon_name:
+        img = Gtk.Image.new_from_icon_name(icon_name, Gtk.IconSize.MENU)
+    else:
+        img = Gtk.Image()
+        img.set_size_request(16, 16)
+    box.pack_start(img, False, False, 0)
+    lbl = Gtk.Label(label=label, xalign=0)
+    box.pack_start(lbl, True, True, 0)
+    item.add(box)
+    item._label = lbl
+    return item
 
 
 class MainWindow(Gtk.ApplicationWindow):
@@ -23,14 +50,21 @@ class MainWindow(Gtk.ApplicationWindow):
         self.set_position(Gtk.WindowPosition.CENTER)
         self.connect("delete-event", self._on_close)
 
+        self.accel_group = Gtk.AccelGroup()
+        self.add_accel_group(self.accel_group)
+
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.add(root)
+
         root.pack_start(self._build_menubar(), False, False, 0)
+        root.pack_start(self._build_toolbar(), False, False, 0)
 
         self.notebook = Gtk.Notebook()
         root.pack_start(self.notebook, True, True, 0)
 
         self.catalogue = CatalogueTab()
+        self.catalogue.connect("selection-changed",
+                               self._on_catalogue_selection)
         self.doi_tab = DoiLookupTab()
         self.doi_tab.connect("goto-record", self._on_goto_record)
 
@@ -41,45 +75,163 @@ class MainWindow(Gtk.ApplicationWindow):
         self._sb_ctx = self.statusbar.get_context_id("main")
         root.pack_start(self.statusbar, False, False, 0)
 
+        self._apply_prefs_to_widgets()
+        self._update_actions_sensitivity()
         self._update_title()
         self._set_status("No workspace open. Use File \u2192 Open Workspace.")
 
-    # ------------------------------------------------------------------
+    # ==================================================================
+    # Menubar
+    # ==================================================================
     def _build_menubar(self):
         menubar = Gtk.MenuBar()
-        file_item = Gtk.MenuItem(label="File")
-        file_menu = Gtk.Menu()
-        file_item.set_submenu(file_menu)
+        menubar.append(self._file_menu())
+        menubar.append(self._edit_menu())
+        menubar.append(self._view_menu())
+        menubar.append(self._record_menu())
+        menubar.append(self._tools_menu())
+        menubar.append(self._help_menu())
+        return menubar
 
-        self.mi_open = Gtk.MenuItem(label="Open Workspace\u2026")
+    def _accel(self, item, key, mods):
+        item.add_accelerator("activate", self.accel_group, key, mods,
+                             Gtk.AccelFlags.VISIBLE)
+
+    def _file_menu(self):
+        top = Gtk.MenuItem(label="File")
+        menu = Gtk.Menu()
+        top.set_submenu(menu)
+
+        self.mi_open = _menu_item("Open Workspace\u2026", "document-open")
         self.mi_open.connect("activate", self._on_open_workspace)
-        file_menu.append(self.mi_open)
+        self._accel(self.mi_open, Gdk.KEY_o, Gdk.ModifierType.CONTROL_MASK)
+        menu.append(self.mi_open)
 
-        self.mi_close = Gtk.MenuItem(label="Close Workspace")
+        self.mi_close = _menu_item("Close Workspace", "window-close")
         self.mi_close.connect("activate", self._on_close_workspace)
-        self.mi_close.set_sensitive(False)
-        file_menu.append(self.mi_close)
+        menu.append(self.mi_close)
 
-        file_menu.append(Gtk.SeparatorMenuItem())
+        menu.append(Gtk.SeparatorMenuItem())
 
         self.recent_menu_item = Gtk.MenuItem(label="Recent Workspaces")
         self.recent_submenu = Gtk.Menu()
         self.recent_menu_item.set_submenu(self.recent_submenu)
-        file_menu.append(self.recent_menu_item)
+        menu.append(self.recent_menu_item)
         self._rebuild_recent_menu()
 
-        file_menu.append(Gtk.SeparatorMenuItem())
+        menu.append(Gtk.SeparatorMenuItem())
 
-        mi_reindex = Gtk.MenuItem(label="Rescan Workspace")
-        mi_reindex.connect("activate", self._on_reindex)
-        file_menu.append(mi_reindex)
+        self.mi_import = _menu_item("Import .bib\u2026", "document-import")
+        self.mi_import.connect("activate", self._on_import)
+        self._accel(self.mi_import, Gdk.KEY_i, Gdk.ModifierType.CONTROL_MASK)
+        menu.append(self.mi_import)
 
-        mi_quit = Gtk.MenuItem(label="Quit")
+        menu.append(Gtk.SeparatorMenuItem())
+
+        mi_quit = _menu_item("Quit", "application-exit")
         mi_quit.connect("activate", lambda *_: self.close())
-        file_menu.append(mi_quit)
+        self._accel(mi_quit, Gdk.KEY_q, Gdk.ModifierType.CONTROL_MASK)
+        menu.append(mi_quit)
+        return top
 
-        menubar.append(file_item)
-        return menubar
+    def _edit_menu(self):
+        top = Gtk.MenuItem(label="Edit")
+        menu = Gtk.Menu()
+        top.set_submenu(menu)
+        mi_prefs = _menu_item("Preferences\u2026", "preferences-system")
+        mi_prefs.connect("activate", self._on_preferences)
+        self._accel(mi_prefs, Gdk.KEY_comma, Gdk.ModifierType.CONTROL_MASK)
+        menu.append(mi_prefs)
+        return top
+
+    def _view_menu(self):
+        top = Gtk.MenuItem(label="View")
+        menu = Gtk.Menu()
+        top.set_submenu(menu)
+
+        self.mi_toggle_sidebar = Gtk.CheckMenuItem(label="Show Sidebar")
+        self.mi_toggle_sidebar.set_active(True)
+        self.mi_toggle_sidebar.connect("toggled", self._on_toggle_sidebar)
+        self._accel(self.mi_toggle_sidebar, Gdk.KEY_F9, 0)
+        menu.append(self.mi_toggle_sidebar)
+
+        self.mi_toggle_detail = Gtk.CheckMenuItem(label="Show Detail Pane")
+        self.mi_toggle_detail.set_active(True)
+        self.mi_toggle_detail.connect("toggled", self._on_toggle_detail)
+        self._accel(self.mi_toggle_detail, Gdk.KEY_F10, 0)
+        menu.append(self.mi_toggle_detail)
+
+        menu.append(Gtk.SeparatorMenuItem())
+
+        mi_cat = _menu_item("Catalogue Tab")
+        mi_cat.connect("activate", lambda *_: self.notebook.set_current_page(0))
+        self._accel(mi_cat, Gdk.KEY_1, Gdk.ModifierType.MOD1_MASK)
+        menu.append(mi_cat)
+
+        mi_doi = _menu_item("DOI Lookup Tab")
+        mi_doi.connect("activate", lambda *_: self.notebook.set_current_page(1))
+        self._accel(mi_doi, Gdk.KEY_2, Gdk.ModifierType.MOD1_MASK)
+        menu.append(mi_doi)
+
+        menu.append(Gtk.SeparatorMenuItem())
+
+        mi_refresh = _menu_item("Refresh Current View", "view-refresh")
+        mi_refresh.connect("activate", self._on_refresh_view)
+        self._accel(mi_refresh, Gdk.KEY_F5, 0)
+        menu.append(mi_refresh)
+        return top
+
+    def _record_menu(self):
+        top = Gtk.MenuItem(label="Record")
+        menu = Gtk.Menu()
+        top.set_submenu(menu)
+
+        self.mi_reveal_bib = _menu_item("Reveal .bib in File Manager",
+                                        "folder-open")
+        self.mi_reveal_bib.connect("activate",
+                                   lambda *_: self._reveal("bib"))
+        menu.append(self.mi_reveal_bib)
+
+        self.mi_reveal_md = _menu_item("Reveal .md in File Manager",
+                                       "folder-open")
+        self.mi_reveal_md.connect("activate",
+                                  lambda *_: self._reveal("md"))
+        menu.append(self.mi_reveal_md)
+
+        menu.append(Gtk.SeparatorMenuItem())
+
+        self.mi_rename = _menu_item("Rename Bibliotheca ID\u2026",
+                                    "document-edit")
+        self.mi_rename.connect("activate", self._on_rename_record)
+        self._accel(self.mi_rename, Gdk.KEY_F2, 0)
+        menu.append(self.mi_rename)
+        return top
+
+    def _tools_menu(self):
+        top = Gtk.MenuItem(label="Tools")
+        menu = Gtk.Menu()
+        top.set_submenu(menu)
+        self.mi_validate = _menu_item("Validate Workspace\u2026",
+                                      "emblem-important")
+        self.mi_validate.connect("activate", self._on_validate)
+        menu.append(self.mi_validate)
+        return top
+
+    def _help_menu(self):
+        top = Gtk.MenuItem(label="Help")
+        menu = Gtk.Menu()
+        top.set_submenu(menu)
+
+        mi_keys = _menu_item("Keyboard Shortcuts", "preferences-desktop-keyboard")
+        mi_keys.connect("activate", self._on_shortcuts)
+        self._accel(mi_keys, Gdk.KEY_question,
+                    Gdk.ModifierType.CONTROL_MASK)
+        menu.append(mi_keys)
+
+        mi_about = _menu_item("About", "help-about")
+        mi_about.connect("activate", self._on_about)
+        menu.append(mi_about)
+        return top
 
     def _rebuild_recent_menu(self):
         for child in self.recent_submenu.get_children():
@@ -92,19 +244,42 @@ class MainWindow(Gtk.ApplicationWindow):
         else:
             for path in recents:
                 mi = Gtk.MenuItem(label=path)
-                mi.connect("activate",
-                           lambda _w, p=path: self._open_path(p))
+                mi.connect("activate", lambda _w, p=path: self._open_path(p))
                 self.recent_submenu.append(mi)
         self.recent_submenu.show_all()
 
-    # ------------------------------------------------------------------
+    # ==================================================================
+    # Toolbar
+    # ==================================================================
+    def _build_toolbar(self):
+        tb = Gtk.Toolbar()
+        tb.set_style(Gtk.ToolbarStyle.ICONS)
+
+        self.tb_rescan = Gtk.ToolButton.new(
+            Gtk.Image.new_from_icon_name("view-refresh", Gtk.IconSize.LARGE_TOOLBAR),
+            "Rescan")
+        self.tb_rescan.set_tooltip_text("Rescan workspace")
+        self.tb_rescan.connect("clicked", self._on_reindex)
+        tb.insert(self.tb_rescan, -1)
+
+        self.tb_import = Gtk.ToolButton.new(
+            Gtk.Image.new_from_icon_name("document-import", Gtk.IconSize.LARGE_TOOLBAR),
+            "Import")
+        self.tb_import.set_tooltip_text("Import a .bib file (Ctrl+I)")
+        self.tb_import.connect("clicked", self._on_import)
+        tb.insert(self.tb_import, -1)
+
+        return tb
+
+    # ==================================================================
+    # Workspace open/close/rescan
+    # ==================================================================
     def _on_open_workspace(self, _item):
         dialog = Gtk.FileChooserDialog(
             title="Open Workspace Folder", parent=self,
             action=Gtk.FileChooserAction.SELECT_FOLDER)
-        dialog.add_buttons(
-            "_Cancel", Gtk.ResponseType.CANCEL,
-            "_Open", Gtk.ResponseType.OK)
+        dialog.add_buttons("_Cancel", Gtk.ResponseType.CANCEL,
+                           "_Open", Gtk.ResponseType.OK)
         if dialog.run() == Gtk.ResponseType.OK:
             path = dialog.get_filename()
             dialog.destroy()
@@ -116,9 +291,8 @@ class MainWindow(Gtk.ApplicationWindow):
         if not path:
             return
         if not Workspace.looks_like_workspace(path):
-            self._warn(
-                f"'{path}' does not look like a QDVC workspace "
-                "(no bibtex/ or markdown/ folder).")
+            self._warn(f"'{path}' does not look like a QDVC workspace "
+                       "(no bibtex/ or markdown/ folder).")
             return
         try:
             ws = Workspace(path)
@@ -129,23 +303,22 @@ class MainWindow(Gtk.ApplicationWindow):
         self.workspace = ws
         self.catalogue.set_workspace(ws)
         self.doi_tab.set_workspace(ws)
-        self.mi_close.set_sensitive(True)
         self.config.last_workspace = path
         self.config.push_recent(path)
         self.config.save()
         self._rebuild_recent_menu()
+        self._update_actions_sensitivity()
         self._update_title()
-        self._set_status(
-            f"Opened {path} \u2014 {len(ws.records)} records, "
-            f"{len(ws.my_works)} works.")
+        self._set_status(f"Opened {path} \u2014 {len(ws.records)} records, "
+                         f"{len(ws.my_works)} works.")
 
     def _on_close_workspace(self, _item):
         self.catalogue.set_workspace(None)
         self.doi_tab.set_workspace(None)
         self.workspace = None
-        self.mi_close.set_sensitive(False)
         self.config.last_workspace = None
         self.config.save()
+        self._update_actions_sensitivity()
         self._update_title()
         self._set_status("Workspace closed.")
 
@@ -158,28 +331,283 @@ class MainWindow(Gtk.ApplicationWindow):
         self._set_status(
             f"Rescanned \u2014 {len(self.workspace.records)} records.")
 
+    # ==================================================================
+    # Import
+    # ==================================================================
+    def _on_import(self, _item):
+        if not self.workspace:
+            self._warn("Open a workspace first.")
+            return
+        dialog = Gtk.FileChooserDialog(
+            title="Import BibTeX file(s)", parent=self,
+            action=Gtk.FileChooserAction.OPEN)
+        dialog.add_buttons("_Cancel", Gtk.ResponseType.CANCEL,
+                           "_Import", Gtk.ResponseType.OK)
+        dialog.set_select_multiple(True)
+        flt = Gtk.FileFilter()
+        flt.set_name("BibTeX files (*.bib)")
+        flt.add_pattern("*.bib")
+        dialog.add_filter(flt)
+        if dialog.run() != Gtk.ResponseType.OK:
+            dialog.destroy()
+            return
+        files = dialog.get_filenames()
+        dialog.destroy()
+        total = []
+        errors = []
+        for f in files:
+            try:
+                total.extend(self.workspace.import_bib_file(f))
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{Path(f).name}: {exc}")
+        self.catalogue.set_workspace(self.workspace)
+        if errors:
+            self._warn("Some files could not be imported:\n" +
+                       "\n".join(errors))
+        self._set_status(f"Imported {len(total)} record(s).")
+
+    # ==================================================================
+    # Preferences
+    # ==================================================================
+    def _on_preferences(self, _item):
+        dlg = PreferencesDialog(self, self.config)
+        if dlg.run() == Gtk.ResponseType.OK:
+            dlg.apply()
+            self._apply_prefs_to_widgets()
+        dlg.destroy()
+
+    def _apply_prefs_to_widgets(self):
+        font = self.config.get("notes_font", "Monospace 10")
+        self.catalogue.set_notes_font(font)
+        self.catalogue.set_autosave(self.config.get("autosave_notes", True))
+
+    # ==================================================================
+    # View toggles / refresh
+    # ==================================================================
+    def _on_toggle_sidebar(self, item):
+        self.catalogue.set_sidebar_visible(item.get_active())
+
+    def _on_toggle_detail(self, item):
+        self.catalogue.set_detail_visible(item.get_active())
+
+    def _on_refresh_view(self, _item):
+        self.catalogue.refresh_current_view()
+        self._set_status("View refreshed.")
+
+    # ==================================================================
+    # Record actions
+    # ==================================================================
+    def _current_record(self):
+        return self.catalogue.current_record()
+
+    def _reveal(self, which):
+        rec = self._current_record()
+        if not rec:
+            return
+        target = rec.bib_path if which == "bib" else rec.md_path
+        if not target:
+            self._warn("No file path for this record.")
+            return
+        p = Path(target)
+        folder = str(p.parent)
+        custom = self.config.get("file_manager", "")
+        try:
+            if custom:
+                cmd = custom.replace("{dir}", folder).replace("{file}",
+                                                              str(p))
+                subprocess.Popen(shlex.split(cmd))
+            else:
+                self._xdg_open(folder)
+        except Exception as exc:  # noqa: BLE001
+            self._warn(f"Could not open file manager:\n{exc}")
+
+    @staticmethod
+    def _xdg_open(path):
+        if sys.platform == "darwin":
+            subprocess.Popen(["open", path])
+        elif os.name == "nt":
+            os.startfile(path)  # type: ignore[attr-defined]
+        else:
+            subprocess.Popen(["xdg-open", path])
+
+    def _on_rename_record(self, _item):
+        rec = self._current_record()
+        if not rec:
+            self._warn("Select a record first.")
+            return
+        old_id = rec.bibliotheca_id
+        dlg = Gtk.Dialog(title="Rename Bibliotheca ID", transient_for=self,
+                         modal=True)
+        dlg.add_button("_Cancel", Gtk.ResponseType.CANCEL)
+        dlg.add_button("_Rename", Gtk.ResponseType.OK)
+        dlg.set_default_response(Gtk.ResponseType.OK)
+        area = dlg.get_content_area()
+        area.set_border_width(10)
+        area.set_spacing(6)
+        area.add(Gtk.Label(label=f"Rename '{old_id}' to:", xalign=0))
+        entry = Gtk.Entry()
+        entry.set_text(old_id)
+        entry.set_activates_default(True)
+        area.add(entry)
+        dlg.show_all()
+        if dlg.run() == Gtk.ResponseType.OK:
+            new_id = entry.get_text().strip()
+            dlg.destroy()
+            try:
+                self.workspace.rename_record(old_id, new_id)
+            except ValueError as exc:
+                self._warn(str(exc))
+                return
+            self.catalogue.set_workspace(self.workspace)
+            self.catalogue.reveal_record(new_id)
+            self._set_status(f"Renamed '{old_id}' \u2192 '{new_id}'.")
+        else:
+            dlg.destroy()
+
+    def _on_catalogue_selection(self, _tab, has_selection):
+        self._update_actions_sensitivity()
+
+    # ==================================================================
+    # Tools: validate
+    # ==================================================================
+    def _on_validate(self, _item):
+        if not self.workspace:
+            self._warn("Open a workspace first.")
+            return
+        report = self.workspace.validate()
+        self._show_validation_report(report)
+
+    def _show_validation_report(self, report):
+        dlg = Gtk.Dialog(title="Workspace Validation", transient_for=self,
+                         modal=True)
+        dlg.add_button("_Close", Gtk.ResponseType.CLOSE)
+        dlg.set_default_size(640, 480)
+        area = dlg.get_content_area()
+        area.set_border_width(8)
+
+        sw = Gtk.ScrolledWindow()
+        sw.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        view = Gtk.TextView()
+        view.set_editable(False)
+        view.set_monospace(True)
+        view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        buf = view.get_buffer()
+        buf.set_text(self._format_report(report))
+        sw.add(view)
+        area.pack_start(sw, True, True, 0)
+
+        dlg.show_all()
+        dlg.run()
+        dlg.destroy()
+
+    @staticmethod
+    def _format_report(report):
+        lines = []
+        total_problems = sum(len(v) for v in report.values())
+        if total_problems == 0:
+            return "No problems found. The workspace looks healthy."
+
+        def section(title, items, fmt):
+            if not items:
+                return
+            lines.append(f"{title} ({len(items)}):")
+            for it in items:
+                lines.append("  \u2022 " + fmt(it))
+            lines.append("")
+
+        section("Orphan Markdown files (no matching .bib)",
+                 report["orphan_markdown"], lambda p: p)
+        section("Missing full-text files",
+                report["missing_fulltext"],
+                lambda t: f"{t[0]} [{t[1]}] \u2192 {t[2]}")
+        section("Citations to unknown records",
+                report["dangling_citations"],
+                lambda t: f"work '{t[0]}' cites missing '{t[1]}'")
+        section("'published_as' pointing to unknown records",
+                report["dangling_published_as"],
+                lambda t: f"work '{t[0]}' \u2192 missing '{t[1]}'")
+        section("Duplicate DOIs",
+                report["duplicate_dois"],
+                lambda t: f"{t[0]} \u2192 {', '.join(t[1])}")
+        return "\n".join(lines).rstrip()
+
+    # ==================================================================
+    # Help
+    # ==================================================================
+    def _on_shortcuts(self, _item):
+        rows = [
+            ("Ctrl+O", "Open workspace"),
+            ("Ctrl+I", "Import .bib"),
+            ("Ctrl+Q", "Quit"),
+            ("Ctrl+,", "Preferences"),
+            ("F9", "Toggle sidebar"),
+            ("F10", "Toggle detail pane"),
+            ("Alt+1", "Catalogue tab"),
+            ("Alt+2", "DOI Lookup tab"),
+            ("F5", "Refresh current view"),
+            ("F2", "Rename Bibliotheca ID"),
+            ("Ctrl+?", "This shortcuts list"),
+        ]
+        dlg = Gtk.Dialog(title="Keyboard Shortcuts", transient_for=self,
+                         modal=True)
+        dlg.add_button("_Close", Gtk.ResponseType.CLOSE)
+        grid = Gtk.Grid(column_spacing=24, row_spacing=6)
+        grid.set_border_width(14)
+        for i, (keys, desc) in enumerate(rows):
+            k = Gtk.Label(xalign=0)
+            k.set_markup(f"<tt>{keys}</tt>")
+            grid.attach(k, 0, i, 1, 1)
+            grid.attach(Gtk.Label(label=desc, xalign=0), 1, i, 1, 1)
+        dlg.get_content_area().add(grid)
+        dlg.show_all()
+        dlg.run()
+        dlg.destroy()
+
+    def _on_about(self, _item):
+        about = Gtk.AboutDialog(transient_for=self, modal=True)
+        about.set_program_name(APP_NAME)
+        about.set_version(__version__)
+        about.set_comments("A personal reference manager for academics.")
+        about.set_logo_icon_name("accessories-dictionary")
+        about.run()
+        about.destroy()
+
+    # ==================================================================
+    # DOI goto
+    # ==================================================================
     def _on_goto_record(self, _tab, bibliotheca_id):
         self.notebook.set_current_page(0)
         if not self.catalogue.reveal_record(bibliotheca_id):
             self._set_status(
                 f"Record {bibliotheca_id} not found in current view.")
 
-    # ------------------------------------------------------------------
+    # ==================================================================
+    # Lifecycle / helpers
+    # ==================================================================
     def open_last_workspace_if_any(self):
+        if not self.config.get("reopen_last", True):
+            return
         last = self.config.last_workspace
         if last and Workspace.looks_like_workspace(last):
             self._open_path(last)
 
     def _on_close(self, *_a):
-        # persist notes + window size
-        self.catalogue._flush_notes()
+        self.catalogue.flush_notes()
         alloc = self.get_allocation()
         self.config.window["width"] = alloc.width
         self.config.window["height"] = alloc.height
         self.config.save()
         return False
 
-    # ------------------------------------------------------------------
+    def _update_actions_sensitivity(self):
+        has_ws = self.workspace is not None
+        has_rec = has_ws and self.catalogue.current_record() is not None
+        for w in (self.mi_close, self.mi_import, self.mi_validate,
+                  self.tb_rescan, self.tb_import):
+            w.set_sensitive(has_ws)
+        for w in (self.mi_reveal_bib, self.mi_reveal_md, self.mi_rename):
+            w.set_sensitive(has_rec)
+
     def _update_title(self):
         if self.workspace:
             self.set_title(f"{APP_NAME} \u2014 {self.workspace.root.name}")
@@ -191,9 +619,8 @@ class MainWindow(Gtk.ApplicationWindow):
         self.statusbar.push(self._sb_ctx, text)
 
     def _warn(self, message):
-        dlg = Gtk.MessageDialog(
-            transient_for=self, modal=True,
-            message_type=Gtk.MessageType.WARNING,
-            buttons=Gtk.ButtonsType.OK, text=message)
+        dlg = Gtk.MessageDialog(transient_for=self, modal=True,
+                                message_type=Gtk.MessageType.WARNING,
+                                buttons=Gtk.ButtonsType.OK, text=message)
         dlg.run()
         dlg.destroy()
