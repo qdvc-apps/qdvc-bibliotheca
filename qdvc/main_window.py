@@ -1,9 +1,5 @@
 """Main window: menubar + toolbar + notebook tabs."""
 
-import os
-import shlex
-import subprocess
-import sys
 from pathlib import Path
 
 import gi
@@ -17,6 +13,8 @@ from .catalogue_tab import CatalogueTab
 from .doi_tab import DoiLookupTab
 from .authors_tab import AuthorsTab
 from .preferences import PreferencesDialog
+from .platform_utils import (open_with_default_app, open_with_text_editor,
+                             reveal_in_file_manager)
 
 
 def _menu_item(label, icon_name=None):
@@ -44,6 +42,15 @@ class MainWindow(Gtk.ApplicationWindow):
         super().__init__(application=app, title=APP_NAME)
         self.config = config
         self.workspace = None
+
+        # Icon shown in the window frame and (with a matching StartupWMClass in
+        # the .desktop file) in the MATE panel / taskbar. We try a bundled
+        # icon name first, falling back to a stock themed icon.
+        try:
+            Gtk.Window.set_default_icon_name("qdvc-bibliotheca")
+            self.set_icon_name("qdvc-bibliotheca")
+        except Exception:  # noqa: BLE001
+            pass
 
         w = self.config.window.get("width", 1100)
         h = self.config.window.get("height", 720)
@@ -132,6 +139,10 @@ class MainWindow(Gtk.ApplicationWindow):
         self._accel(self.mi_import, Gdk.KEY_i, Gdk.ModifierType.CONTROL_MASK)
         menu.append(self.mi_import)
 
+        self.mi_refresh_ws = _menu_item("Refresh Workspace", "view-refresh")
+        self.mi_refresh_ws.connect("activate", self._on_reindex)
+        menu.append(self.mi_refresh_ws)
+
         menu.append(Gtk.SeparatorMenuItem())
 
         mi_quit = _menu_item("Quit", "application-exit")
@@ -212,6 +223,24 @@ class MainWindow(Gtk.ApplicationWindow):
 
         menu.append(Gtk.SeparatorMenuItem())
 
+        self.mi_edit_bib = _menu_item("Open .bib in Text Editor",
+                                      "accessories-text-editor")
+        self.mi_edit_bib.connect("activate",
+                                 lambda *_: self._open_in_editor("bib"))
+        menu.append(self.mi_edit_bib)
+
+        self.mi_edit_md = _menu_item("Open .md in Text Editor",
+                                     "accessories-text-editor")
+        self.mi_edit_md.connect("activate",
+                                lambda *_: self._open_in_editor("md"))
+        menu.append(self.mi_edit_md)
+
+        self.mi_open_pdf = _menu_item("Open PDF", "application-pdf")
+        self.mi_open_pdf.connect("activate", lambda *_: self._open_pdf())
+        menu.append(self.mi_open_pdf)
+
+        menu.append(Gtk.SeparatorMenuItem())
+
         self.mi_rename = _menu_item("Rename Bibliotheca ID\u2026",
                                     "document-edit")
         self.mi_rename.connect("activate", self._on_rename_record)
@@ -265,7 +294,7 @@ class MainWindow(Gtk.ApplicationWindow):
     # ==================================================================
     def _build_toolbar(self):
         tb = Gtk.Toolbar()
-        tb.set_style(Gtk.ToolbarStyle.ICONS)
+        self.toolbar = tb
 
         self.tb_rescan = Gtk.ToolButton.new(
             Gtk.Image.new_from_icon_name("view-refresh", Gtk.IconSize.LARGE_TOOLBAR),
@@ -281,7 +310,15 @@ class MainWindow(Gtk.ApplicationWindow):
         self.tb_import.connect("clicked", self._on_import)
         tb.insert(self.tb_import, -1)
 
+        self._apply_toolbar_style()
         return tb
+
+    def _apply_toolbar_style(self):
+        """Set icons-with-labels layout per the user's preference."""
+        style = self.config.get("toolbar_style", "beside")
+        gtk_style = (Gtk.ToolbarStyle.BOTH_HORIZ if style == "beside"
+                     else Gtk.ToolbarStyle.BOTH)
+        self.toolbar.set_style(gtk_style)
 
     # ==================================================================
     # Workspace open/close/rescan
@@ -391,6 +428,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.catalogue.set_autosave(self.config.get("autosave_notes", True))
         self.catalogue.set_fulltext_root(
             self.config.get("fulltext_library_path", "") or None)
+        self._apply_toolbar_style()
 
     # ==================================================================
     # View toggles / refresh
@@ -419,27 +457,42 @@ class MainWindow(Gtk.ApplicationWindow):
         if not target:
             self._warn("No file path for this record.")
             return
-        p = Path(target)
-        folder = str(p.parent)
-        custom = self.config.get("file_manager", "")
+        custom = self.config.get("file_manager", "") or None
         try:
-            if custom:
-                cmd = custom.replace("{dir}", folder).replace("{file}",
-                                                              str(p))
-                subprocess.Popen(shlex.split(cmd))
-            else:
-                self._xdg_open(folder)
+            reveal_in_file_manager(target, custom)
         except Exception as exc:  # noqa: BLE001
             self._warn(f"Could not open file manager:\n{exc}")
 
-    @staticmethod
-    def _xdg_open(path):
-        if sys.platform == "darwin":
-            subprocess.Popen(["open", path])
-        elif os.name == "nt":
-            os.startfile(path)  # type: ignore[attr-defined]
-        else:
-            subprocess.Popen(["xdg-open", path])
+    def _open_in_editor(self, which):
+        rec = self._current_record()
+        if not rec:
+            return
+        target = rec.bib_path if which == "bib" else rec.md_path
+        if not target or not Path(target).exists():
+            self._warn(f"No {which} file exists for this record yet.")
+            return
+        try:
+            open_with_text_editor(str(target))
+        except Exception as exc:  # noqa: BLE001
+            self._warn(f"Could not open text editor:\n{exc}")
+
+    def _open_pdf(self):
+        rec = self._current_record()
+        if not rec:
+            return
+        path = self.workspace.resolve_fulltext_path(
+            rec.bibliotheca_id, "pdf",
+            self.config.get("fulltext_library_path", "") or None)
+        if not path:
+            self._warn("No PDF is set for this record.")
+            return
+        if not Path(path).exists():
+            self._warn(f"The PDF could not be found:\n{path}")
+            return
+        try:
+            open_with_default_app(path)
+        except Exception as exc:  # noqa: BLE001
+            self._warn(f"Could not open PDF:\n{exc}")
 
     def _on_rename_record(self, _item):
         rec = self._current_record()
@@ -501,8 +554,14 @@ class MainWindow(Gtk.ApplicationWindow):
         sw.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
         view = Gtk.TextView()
         view.set_editable(False)
-        view.set_monospace(True)
         view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        # Use the user's "Notes editor font" from Preferences.
+        font = self.config.get("notes_font", "Monospace 10")
+        try:
+            from gi.repository import Pango
+            view.override_font(Pango.FontDescription.from_string(font))
+        except Exception:  # noqa: BLE001
+            view.set_monospace(True)
         buf = view.get_buffer()
         buf.set_text(self._format_report(report))
         sw.add(view)
@@ -529,6 +588,9 @@ class MainWindow(Gtk.ApplicationWindow):
 
         section("Orphan Markdown files (no matching .bib)",
                  report["orphan_markdown"], lambda p: p)
+        section("BibTeX key does not match Bibliotheca ID",
+                report.get("key_mismatch", []),
+                lambda t: f"{t[0]}  (key is '{t[1]}')")
         section("Missing full-text files",
                 report["missing_fulltext"],
                 lambda t: f"{t[0]} [{t[1]}] \u2192 {t[2]}")
@@ -549,13 +611,14 @@ class MainWindow(Gtk.ApplicationWindow):
     def _on_shortcuts(self, _item):
         rows = [
             ("Ctrl+O", "Open workspace"),
-            ("Ctrl+I", "Import .bib"),
+            ("Ctrl+I", "Import BibTeX"),
             ("Ctrl+Q", "Quit"),
             ("Ctrl+,", "Preferences"),
             ("F9", "Toggle sidebar"),
             ("F10", "Toggle detail pane"),
             ("Alt+1", "Catalogue tab"),
-            ("Alt+2", "DOI Lookup tab"),
+            ("Alt+2", "Authors tab"),
+            ("Alt+3", "DOI Lookup tab"),
             ("F5", "Refresh current view"),
             ("F2", "Rename Bibliotheca ID"),
             ("Ctrl+?", "This shortcuts list"),
@@ -622,12 +685,16 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _update_actions_sensitivity(self):
         has_ws = self.workspace is not None
-        has_rec = has_ws and self.catalogue.current_record() is not None
-        for w in (self.mi_close, self.mi_import, self.mi_validate,
-                  self.tb_rescan, self.tb_import):
+        rec = self.catalogue.current_record() if has_ws else None
+        has_rec = rec is not None
+        for w in (self.mi_close, self.mi_import, self.mi_refresh_ws,
+                  self.mi_validate, self.tb_rescan, self.tb_import):
             w.set_sensitive(has_ws)
-        for w in (self.mi_reveal_bib, self.mi_reveal_md, self.mi_rename):
+        for w in (self.mi_reveal_bib, self.mi_reveal_md, self.mi_edit_bib,
+                  self.mi_edit_md, self.mi_rename):
             w.set_sensitive(has_rec)
+        # Open PDF only when the selected record actually has a PDF
+        self.mi_open_pdf.set_sensitive(bool(has_rec and rec.has_pdf))
 
     def _update_title(self):
         if self.workspace:

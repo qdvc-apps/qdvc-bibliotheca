@@ -195,6 +195,14 @@ class Record:
     def apa_plain(self) -> str:
         return apa.format_apa_plain(self.bib())
 
+    @property
+    def outlet(self) -> str:
+        """Display value for the 'Outlet' column: the journal for journal
+        articles, the book title for book chapters, an em dash otherwise."""
+        if self.type_label in ("Journal article", "Book chapter"):
+            return self.journal or "\u2014"
+        return "\u2014"
+
     def read_notes(self) -> tuple[dict, str]:
         if self.md_path:
             return parse_markdown(Path(self.md_path))
@@ -741,7 +749,15 @@ class Workspace:
             "dangling_citations": [],    # (work_name, id)
             "dangling_published_as": [],  # (work_name, id)
             "duplicate_dois": [],        # (doi, [ids])
+            "key_mismatch": [],          # (bibliotheca_id, bibtex_key)
         }
+
+        # BibTeX citation key differs from the Bibliotheca ID (file stem)
+        for bid, rec in self.records.items():
+            entry = rec.bib()
+            key = (entry.get("ID") or entry.get("id") or "").strip()
+            if key and key != bid:
+                report["key_mismatch"].append((bid, key))
 
         # orphan markdown: any .md whose stem is not a known record
         md_root = self.markdown_dir

@@ -79,6 +79,9 @@ class AuthorsTab(Gtk.Box):
         bottom = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         bottom.set_border_width(6)
         self.show_works_btn = Gtk.Button(label="Show works in Catalogue")
+        self.show_works_btn.set_image(Gtk.Image.new_from_icon_name(
+            "edit-find", Gtk.IconSize.BUTTON))
+        self.show_works_btn.set_always_show_image(True)
         self.show_works_btn.connect("clicked", self._on_show_works)
         bottom.pack_end(self.show_works_btn, False, False, 0)
         self.pack_start(bottom, False, False, 0)

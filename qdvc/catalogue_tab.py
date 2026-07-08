@@ -7,6 +7,8 @@ import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, Gdk, Pango, GObject  # noqa: E402
 
+from .platform_utils import open_with_default_app  # noqa: E402
+
 
 # Sidebar node kinds
 NODE_ALL = "all"
@@ -14,6 +16,7 @@ NODE_TYPE = "type"
 NODE_WORK = "work"
 NODE_WORKS_ROOT = "works_root"
 NODE_AUTHOR = "author"
+NODE_TEMP = "temp"  # transient "query results" node at the bottom
 
 
 class CatalogueTab(Gtk.Box):
@@ -33,6 +36,10 @@ class CatalogueTab(Gtk.Box):
         self._fulltext_root = None
         # (kind, key) describing the active sidebar filter, for refresh.
         self._active_filter = (NODE_ALL, "")
+        # transient "query results" sidebar node state
+        self._temp_author_id = None
+        self._temp_iter = None
+        self._suppress_sidebar_change = False
 
         self.paned_outer = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
         self.paned_inner = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
@@ -55,8 +62,8 @@ class CatalogueTab(Gtk.Box):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         sw = Gtk.ScrolledWindow()
         sw.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        # columns: icon-name, label, kind, key
-        self.side_store = Gtk.TreeStore(str, str, str, str)
+        # columns: icon-name, label, kind, key, pango-style(int)
+        self.side_store = Gtk.TreeStore(str, str, str, str, int)
         self.side_view = Gtk.TreeView(model=self.side_store)
         self.side_view.set_headers_visible(False)
         col = Gtk.TreeViewColumn("")
@@ -66,6 +73,7 @@ class CatalogueTab(Gtk.Box):
         col.pack_start(text_r, True)
         col.add_attribute(icon_r, "icon-name", 0)
         col.add_attribute(text_r, "text", 1)
+        col.add_attribute(text_r, "style", 4)
         self.side_view.append_column(col)
         self.side_view.get_selection().connect("changed",
                                                self._on_sidebar_changed)
@@ -77,12 +85,14 @@ class CatalogueTab(Gtk.Box):
         box.set_size_request(200, -1)
         return box
 
-    def _rebuild_sidebar(self):
+    def _rebuild_sidebar(self, temp_author_id=None):
         self.side_store.clear()
+        self._temp_author_id = temp_author_id
+        n = _pango_style_normal()
         self.side_store.append(
-            None, ["edit-select-all", "All articles", NODE_ALL, ""])
+            None, ["edit-select-all", "All articles", NODE_ALL, "", n])
         by_type = self.side_store.append(
-            None, ["view-list-symbolic", "By type", "", ""])
+            None, ["view-list-symbolic", "By type", "", "", n])
         type_icons = {
             "Journal article": "text-x-generic",
             "Conference paper": "presentation",
@@ -95,31 +105,60 @@ class CatalogueTab(Gtk.Box):
                       "Book", "Webpage", "Other"]:
             self.side_store.append(
                 by_type, [type_icons.get(label, "text-x-generic"),
-                          label, NODE_TYPE, label])
+                          label, NODE_TYPE, label, n])
         works = self.side_store.append(
-            None, ["folder-documents", "My works", NODE_WORKS_ROOT, ""])
+            None, ["folder-documents", "My works", NODE_WORKS_ROOT, "", n])
         if self.workspace:
             for key, work in sorted(self.workspace.my_works.items(),
                                     key=lambda kv: kv[1].name.lower()):
                 self.side_store.append(
-                    works, ["emblem-favorite", work.name, NODE_WORK, key])
+                    works, ["emblem-favorite", work.name, NODE_WORK, key, n])
 
         starred_root = self.side_store.append(
-            None, ["starred", "Starred authors", "", ""])
+            None, ["starred", "Starred authors", "", "", n])
         if self.workspace:
             for a in self.workspace.starred_authors():
                 self.side_store.append(
                     starred_root, ["starred", a.display_name,
-                                   NODE_AUTHOR, a.author_id])
+                                   NODE_AUTHOR, a.author_id, n])
+
+        # transient "query results" node pinned at the very bottom
+        if temp_author_id and self.workspace:
+            author = self.workspace.authors.get(temp_author_id)
+            label = "Query results"
+            if author:
+                label = f"Query: {author.display_name}"
+            self._temp_iter = self.side_store.append(
+                None, ["edit-find", label, NODE_TEMP, temp_author_id,
+                       _pango_style_italic()])
+        else:
+            self._temp_iter = None
         self.side_view.expand_all()
 
     def _on_sidebar_changed(self, selection):
+        if self._suppress_sidebar_change:
+            return
         model, it = selection.get_selected()
         if not it:
             return
         kind = model[it][2]
         key = model[it][3]
+        # Selecting anything other than the transient node clears it.
+        if kind != NODE_TEMP and self._temp_iter is not None:
+            self._remove_temp_node()
+        if kind in ("", NODE_WORKS_ROOT):
+            # section headers: no filter action
+            return
         self._apply_filter(kind, key)
+
+    def _remove_temp_node(self):
+        if self._temp_iter is not None:
+            try:
+                self.side_store.remove(self._temp_iter)
+            except Exception:  # noqa: BLE001
+                pass
+        self._temp_iter = None
+        self._temp_author_id = None
 
     def _apply_filter(self, kind, key):
         if not self.workspace:
@@ -133,8 +172,8 @@ class CatalogueTab(Gtk.Box):
         elif kind == NODE_WORK:
             self._active_filter = (NODE_WORK, key)
             self._populate_master(self.workspace.records_for_work(key))
-        elif kind == NODE_AUTHOR:
-            self._active_filter = (NODE_AUTHOR, key)
+        elif kind in (NODE_AUTHOR, NODE_TEMP):
+            self._active_filter = (kind, key)
             self._populate_master(self.workspace.records_for_author(key))
 
     def _on_sidebar_activated(self, _view, path, _col):
@@ -233,11 +272,13 @@ class CatalogueTab(Gtk.Box):
 
         sw = Gtk.ScrolledWindow()
         sw.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-        # columns: pdf_icon, bibliotheca_id, author, year, title, type
-        self.master_store = Gtk.ListStore(str, str, str, str, str, str)
+        # columns: pdf_icon, bibliotheca_id, author, year, outlet, title, type
+        self.master_store = Gtk.ListStore(str, str, str, str, str, str, str)
         self.master_filter = self.master_store.filter_new()
         self.master_filter.set_visible_func(self._filter_visible)
         self.master_view = Gtk.TreeView(model=self.master_filter)
+        self.master_view.connect("button-press-event",
+                                 self._on_master_button_press)
 
         # PDF indicator column (icon only)
         pdf_r = Gtk.CellRendererPixbuf()
@@ -246,7 +287,8 @@ class CatalogueTab(Gtk.Box):
         pdf_col.set_sizing(Gtk.TreeViewColumnSizing.FIXED)
         self.master_view.append_column(pdf_col)
 
-        text_cols = ["Bibliotheca ID", "Author", "Year", "Title", "Type"]
+        text_cols = ["Bibliotheca ID", "Author", "Year", "Outlet", "Title",
+                     "Type"]
         for offset, title in enumerate(text_cols):
             i = offset + 1  # store column (0 is the icon)
             r = Gtk.CellRendererText()
@@ -254,8 +296,16 @@ class CatalogueTab(Gtk.Box):
             c = Gtk.TreeViewColumn(title, r, text=i)
             c.set_resizable(True)
             c.set_sort_column_id(i)
-            if title == "Title":
+            if title == "Year":
+                # wide enough for a 4-digit year (plus a little breathing room)
+                c.set_sizing(Gtk.TreeViewColumnSizing.FIXED)
+                c.set_fixed_width(60)
+                c.set_min_width(60)
+                r.set_property("ellipsize", Pango.EllipsizeMode.NONE)
+            elif title == "Title":
                 c.set_expand(True)
+            elif title == "Outlet":
+                c.set_min_width(120)
             self.master_view.append_column(c)
         self.master_view.get_selection().connect("changed",
                                                   self._on_master_changed)
@@ -268,7 +318,7 @@ class CatalogueTab(Gtk.Box):
         for r in records:
             icon = "application-pdf" if getattr(r, "has_pdf", False) else ""
             self.master_store.append(
-                [icon, r.bibliotheca_id, r.author, r.year, r.title,
+                [icon, r.bibliotheca_id, r.author, r.year, r.outlet, r.title,
                  r.type_label])
 
     def _filter_visible(self, model, it, _data):
@@ -276,7 +326,7 @@ class CatalogueTab(Gtk.Box):
         if not needle:
             return True
         # search only the text columns (skip the icon column 0)
-        for col in range(1, 6):
+        for col in range(1, 7):
             val = model[it][col] or ""
             if needle in val.lower():
                 return True
@@ -327,25 +377,17 @@ class CatalogueTab(Gtk.Box):
         self.copy_plain_btn.connect("clicked", self._copy_plain)
         btn_box.pack_start(self.copy_rich_btn, False, False, 0)
         btn_box.pack_start(self.copy_plain_btn, False, False, 0)
-        box.pack_start(btn_box, False, False, 4)
 
-        # full-text row
-        ft_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        self.set_pdf_btn = Gtk.Button(label="Set PDF\u2026")
-        self.set_pdf_btn.set_tooltip_text(
-            "Choose the PDF for this article (opens at your full-text library)")
-        self.set_pdf_btn.connect("clicked", lambda _b: self._set_fulltext("pdf"))
-        self.set_epub_btn = Gtk.Button(label="Set EPUB\u2026")
-        self.set_epub_btn.connect("clicked",
-                                  lambda _b: self._set_fulltext("epub"))
-        self.clear_ft_btn = Gtk.Button(label="Clear")
-        self.clear_ft_btn.set_tooltip_text("Clear the full-text paths")
-        self.clear_ft_btn.connect("clicked", self._clear_fulltext)
-        ft_box.pack_start(Gtk.Label(label="Full-text:"), False, False, 0)
-        ft_box.pack_start(self.set_pdf_btn, False, False, 0)
-        ft_box.pack_start(self.set_epub_btn, False, False, 0)
-        ft_box.pack_start(self.clear_ft_btn, False, False, 0)
-        box.pack_start(ft_box, False, False, 0)
+        # Open PDF button (uses the PDF icon); shown only when a PDF is set.
+        self.open_pdf_btn = Gtk.Button(label="Open PDF")
+        self.open_pdf_btn.set_image(Gtk.Image.new_from_icon_name(
+            "application-pdf", Gtk.IconSize.BUTTON))
+        self.open_pdf_btn.set_always_show_image(True)
+        self.open_pdf_btn.set_tooltip_text(
+            "Open the PDF with your system viewer")
+        self.open_pdf_btn.connect("clicked", lambda _b: self._open_pdf())
+        btn_box.pack_start(self.open_pdf_btn, False, False, 0)
+        box.pack_start(btn_box, False, False, 4)
 
         notes_lbl = Gtk.Label(xalign=0)
         notes_lbl.set_markup("<b>My notes (Markdown)</b>")
@@ -369,9 +411,10 @@ class CatalogueTab(Gtk.Box):
         return box
 
     def _set_detail_sensitive(self, on):
-        for w in (self.copy_rich_btn, self.copy_plain_btn, self.notes_view,
-                  self.set_pdf_btn, self.set_epub_btn, self.clear_ft_btn):
+        for w in (self.copy_rich_btn, self.copy_plain_btn, self.notes_view):
             w.set_sensitive(on)
+        if not on:
+            self.open_pdf_btn.set_sensitive(False)
 
     def _show_detail(self, rec):
         # persist any pending notes for the previous record first
@@ -409,6 +452,8 @@ class CatalogueTab(Gtk.Box):
         if works:
             detail += f"   \u2022 Cited in {len(works)} of my works"
         self.detail_status.set_text(detail)
+        # Open PDF button only enabled when a PDF is on file
+        self.open_pdf_btn.set_sensitive(bool(fm.get("pdf")))
 
     def _on_notes_changed(self, _buf):
         if self._suppress_notes_save or not self._current_record:
@@ -457,8 +502,47 @@ class CatalogueTab(Gtk.Box):
     # ------------------------------------------------------------------
     # Full-text (PDF/EPUB)
     # ------------------------------------------------------------------
-    def _set_fulltext(self, kind):
-        rec = self._current_record
+    def _on_master_button_press(self, _view, event):
+        if event.button != 3:  # right-click only
+            return False
+        pathinfo = self.master_view.get_path_at_pos(int(event.x), int(event.y))
+        if not pathinfo:
+            return False
+        path = pathinfo[0]
+        self.master_view.get_selection().select_path(path)
+        it = self.master_filter.get_iter(path)
+        bid = self.master_filter[it][1]
+        rec = self.workspace.get(bid) if self.workspace else None
+        if not rec:
+            return False
+
+        fm, _ = rec.read_notes()
+        menu = Gtk.Menu()
+
+        mi_pdf = Gtk.MenuItem(label="Set PDF\u2026")
+        mi_pdf.connect("activate", lambda *_: self._set_fulltext(rec, "pdf"))
+        menu.append(mi_pdf)
+
+        mi_epub = Gtk.MenuItem(label="Set EPUB\u2026")
+        mi_epub.connect("activate", lambda *_: self._set_fulltext(rec, "epub"))
+        menu.append(mi_epub)
+
+        if fm.get("pdf") or fm.get("epub"):
+            menu.append(Gtk.SeparatorMenuItem())
+            if fm.get("pdf"):
+                mi_open = Gtk.MenuItem(label="Open PDF")
+                mi_open.connect("activate", lambda *_: self._open_pdf(rec))
+                menu.append(mi_open)
+            mi_clear = Gtk.MenuItem(label="Remove full-text link(s)")
+            mi_clear.connect("activate",
+                             lambda *_: self._clear_fulltext(rec))
+            menu.append(mi_clear)
+
+        menu.show_all()
+        menu.popup_at_pointer(event)
+        return True
+
+    def _set_fulltext(self, rec, kind):
         if not rec or not self.workspace:
             return
         # persist any pending notes-body edits first, so the fulltext write
@@ -503,8 +587,7 @@ class CatalogueTab(Gtk.Box):
         if outside:
             self._warn_outside_library(label)
 
-    def _clear_fulltext(self, _btn):
-        rec = self._current_record
+    def _clear_fulltext(self, rec):
         if not rec or not self.workspace:
             return
         self._flush_notes()
@@ -513,9 +596,24 @@ class CatalogueTab(Gtk.Box):
                                              self._fulltext_root)
         self._after_fulltext_change(rec)
 
+    def _open_pdf(self, rec=None):
+        rec = rec or self._current_record
+        if not rec or not self.workspace:
+            return
+        path = self.workspace.resolve_fulltext_path(
+            rec.bibliotheca_id, "pdf", self._fulltext_root)
+        if not path:
+            return
+        if not Path(path).exists():
+            self._warn_missing_file(path)
+            return
+        open_with_default_app(path)
+
     def _after_fulltext_change(self, rec):
-        # refresh detail status + the master row's PDF icon
-        self._refresh_detail_status(rec)
+        # refresh detail status (if this is the shown record) + master icon
+        if self._current_record and \
+                self._current_record.bibliotheca_id == rec.bibliotheca_id:
+            self._refresh_detail_status(rec)
         self._update_row_pdf_icon(rec)
 
     def _update_row_pdf_icon(self, rec):
@@ -534,6 +632,15 @@ class CatalogueTab(Gtk.Box):
             "Its absolute path was stored instead of a relative one. To keep "
             "paths portable, place full-text files inside the library folder "
             "set in Preferences.")
+        dlg.run()
+        dlg.destroy()
+
+    def _warn_missing_file(self, path):
+        dlg = Gtk.MessageDialog(
+            transient_for=self.get_toplevel(), modal=True,
+            message_type=Gtk.MessageType.WARNING, buttons=Gtk.ButtonsType.OK,
+            text="The file could not be found.")
+        dlg.format_secondary_text(str(path))
         dlg.run()
         dlg.destroy()
 
@@ -610,14 +717,34 @@ class CatalogueTab(Gtk.Box):
         self._rebuild_sidebar()
 
     def show_author_works(self, author_id):
-        """Filter the master list to a given author's works and select the
-        matching sidebar node if the author is starred (else just filter)."""
+        """Filter the master list to a given author's works. If the author is
+        starred, select their node in the sidebar; otherwise add a transient
+        italic 'Query results' node at the bottom and select that, so Pane 1
+        stays consistent with Pane 2."""
         if not self.workspace:
             return
-        self._apply_filter(NODE_AUTHOR, author_id)
-        # try to reflect selection in the sidebar for starred authors
-        for row in self.side_store:
-            self._select_author_row(row, author_id)
+        author = self.workspace.authors.get(author_id)
+        is_starred = bool(author and author.starred)
+
+        if is_starred:
+            # ensure no stale temp node lingers
+            if self._temp_iter is not None:
+                self._remove_temp_node()
+            self._rebuild_sidebar()
+            selected = False
+            for row in self.side_store:
+                if self._select_author_row(row, author_id):
+                    selected = True
+                    break
+            if not selected:
+                self._apply_filter(NODE_AUTHOR, author_id)
+        else:
+            # rebuild with a transient node pinned at the bottom, and select it
+            self._rebuild_sidebar(temp_author_id=author_id)
+            if self._temp_iter is not None:
+                self.side_view.get_selection().select_iter(self._temp_iter)
+            else:
+                self._apply_filter(NODE_TEMP, author_id)
 
     def _select_author_row(self, parent_row, author_id):
         for child in parent_row.iterchildren():
@@ -634,6 +761,20 @@ class CatalogueTab(Gtk.Box):
 def _markup_to_html(markup: str) -> str:
     # Pango uses <i>, which is already valid HTML. Wrap for completeness.
     return f"<html><body>{markup}</body></html>"
+
+
+def _pango_style_normal() -> int:
+    try:
+        return int(Pango.Style.NORMAL)
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def _pango_style_italic() -> int:
+    try:
+        return int(Pango.Style.ITALIC)
+    except Exception:  # noqa: BLE001
+        return 2
 
 
 # text/html target info id used in the target table below.

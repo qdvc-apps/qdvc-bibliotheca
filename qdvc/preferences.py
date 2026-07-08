@@ -11,7 +11,7 @@ class PreferencesDialog(Gtk.Dialog):
         super().__init__(title="Preferences", transient_for=parent,
                          modal=True)
         self.config = config
-        self.set_default_size(480, 300)
+        self.set_default_size(480, 340)
         self.add_button("_Cancel", Gtk.ResponseType.CANCEL)
         self.add_button("_Save", Gtk.ResponseType.OK)
         self.set_default_response(Gtk.ResponseType.OK)
@@ -64,6 +64,18 @@ class PreferencesDialog(Gtk.Dialog):
         self.autosave_check.set_active(config.get("autosave_notes", True))
         grid.attach(self.autosave_check, 1, 4, 1, 1)
 
+        # Toolbar style
+        grid.attach(_right("Toolbar style:"), 0, 5, 1, 1)
+        self.toolbar_combo = Gtk.ComboBoxText()
+        # id -> label
+        self._toolbar_styles = [("beside", "Labels beside icons"),
+                                ("below", "Labels below icons")]
+        for style_id, label in self._toolbar_styles:
+            self.toolbar_combo.append(style_id, label)
+        self.toolbar_combo.set_active_id(
+            config.get("toolbar_style", "beside"))
+        grid.attach(self.toolbar_combo, 1, 5, 1, 1)
+
         self.show_all()
 
     def _on_browse_library(self, _btn):
@@ -86,6 +98,8 @@ class PreferencesDialog(Gtk.Dialog):
                         self.lib_entry.get_text().strip())
         self.config.set("reopen_last", self.reopen_check.get_active())
         self.config.set("autosave_notes", self.autosave_check.get_active())
+        self.config.set("toolbar_style",
+                        self.toolbar_combo.get_active_id() or "beside")
         self.config.save()
 
 
