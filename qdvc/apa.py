@@ -24,6 +24,34 @@ def _split_authors(raw: str) -> list[str]:
     return [p.strip() for p in parts if p.strip()]
 
 
+def split_name(name: str) -> tuple[str, str]:
+    """Split a single BibTeX author token into (surname, given_names).
+
+    Handles both "Surname, Given Names" and "Given Names Surname" forms.
+    Returns given_names as a space-joined string (may be empty).
+    """
+    name = name.replace("{", "").replace("}", "").strip()
+    if not name:
+        return "", ""
+    if "," in name:
+        last, _, first = name.partition(",")
+        return last.strip(), first.strip()
+    bits = name.split()
+    if len(bits) == 1:
+        return bits[0], ""
+    return bits[-1], " ".join(bits[:-1])
+
+
+def author_tokens(raw: str) -> list[tuple[str, str]]:
+    """Return a list of (surname, given_names) for every author in `raw`."""
+    out = []
+    for tok in _split_authors(raw):
+        surname, given = split_name(tok)
+        if surname:
+            out.append((surname, given))
+    return out
+
+
 def _format_one_author(name: str) -> str:
     """Return 'Surname, F. M.' for a single BibTeX author token."""
     name = name.replace("{", "").replace("}", "").strip()

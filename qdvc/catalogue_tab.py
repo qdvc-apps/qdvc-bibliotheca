@@ -1,5 +1,7 @@
 """The Catalogue tab: a three-pane master-detail view."""
 
+from pathlib import Path
+
 import gi
 
 gi.require_version("Gtk", "3.0")
@@ -10,6 +12,8 @@ from gi.repository import Gtk, Gdk, Pango, GObject  # noqa: E402
 NODE_ALL = "all"
 NODE_TYPE = "type"
 NODE_WORK = "work"
+NODE_WORKS_ROOT = "works_root"
+NODE_AUTHOR = "author"
 
 
 class CatalogueTab(Gtk.Box):
@@ -26,6 +30,7 @@ class CatalogueTab(Gtk.Box):
         self._current_record = None
         self._suppress_notes_save = False
         self._autosave = True
+        self._fulltext_root = None
         # (kind, key) describing the active sidebar filter, for refresh.
         self._active_filter = (NODE_ALL, "")
 
@@ -65,23 +70,10 @@ class CatalogueTab(Gtk.Box):
         self.side_view.get_selection().connect("changed",
                                                self._on_sidebar_changed)
         self.side_view.connect("row-activated", self._on_sidebar_activated)
+        self.side_view.connect("button-press-event",
+                               self._on_sidebar_button_press)
         sw.add(self.side_view)
         box.pack_start(sw, True, True, 0)
-
-        # small action bar for My works management
-        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
-        self.add_work_btn = Gtk.Button.new_from_icon_name(
-            "list-add", Gtk.IconSize.SMALL_TOOLBAR)
-        self.add_work_btn.set_tooltip_text("New work\u2026")
-        self.add_work_btn.connect("clicked", self._on_add_work)
-        self.edit_work_btn = Gtk.Button.new_from_icon_name(
-            "document-edit", Gtk.IconSize.SMALL_TOOLBAR)
-        self.edit_work_btn.set_tooltip_text("Edit selected work\u2026")
-        self.edit_work_btn.connect("clicked", self._on_edit_selected_work)
-        bar.pack_start(self.add_work_btn, False, False, 0)
-        bar.pack_start(self.edit_work_btn, False, False, 0)
-        box.pack_start(bar, False, False, 0)
-
         box.set_size_request(200, -1)
         return box
 
@@ -105,12 +97,20 @@ class CatalogueTab(Gtk.Box):
                 by_type, [type_icons.get(label, "text-x-generic"),
                           label, NODE_TYPE, label])
         works = self.side_store.append(
-            None, ["folder-documents", "My works", "", ""])
+            None, ["folder-documents", "My works", NODE_WORKS_ROOT, ""])
         if self.workspace:
             for key, work in sorted(self.workspace.my_works.items(),
                                     key=lambda kv: kv[1].name.lower()):
                 self.side_store.append(
                     works, ["emblem-favorite", work.name, NODE_WORK, key])
+
+        starred_root = self.side_store.append(
+            None, ["starred", "Starred authors", "", ""])
+        if self.workspace:
+            for a in self.workspace.starred_authors():
+                self.side_store.append(
+                    starred_root, ["starred", a.display_name,
+                                   NODE_AUTHOR, a.author_id])
         self.side_view.expand_all()
 
     def _on_sidebar_changed(self, selection):
@@ -133,11 +133,46 @@ class CatalogueTab(Gtk.Box):
         elif kind == NODE_WORK:
             self._active_filter = (NODE_WORK, key)
             self._populate_master(self.workspace.records_for_work(key))
+        elif kind == NODE_AUTHOR:
+            self._active_filter = (NODE_AUTHOR, key)
+            self._populate_master(self.workspace.records_for_author(key))
 
     def _on_sidebar_activated(self, _view, path, _col):
         it = self.side_store.get_iter(path)
         if self.side_store[it][2] == NODE_WORK:
             self._edit_work(self.side_store[it][3])
+
+    def _on_sidebar_button_press(self, _view, event):
+        # right-click (button 3) -> context menu on the row under the pointer
+        if event.button != 3:
+            return False
+        pathinfo = self.side_view.get_path_at_pos(int(event.x), int(event.y))
+        if not pathinfo:
+            return False
+        path = pathinfo[0]
+        self.side_view.get_selection().select_path(path)
+        it = self.side_store.get_iter(path)
+        kind = self.side_store[it][2]
+        key = self.side_store[it][3]
+        menu = None
+        if kind == NODE_WORKS_ROOT:
+            menu = Gtk.Menu()
+            mi = Gtk.MenuItem(label="Add work\u2026")
+            mi.connect("activate", lambda *_: self._add_work())
+            menu.append(mi)
+        elif kind == NODE_WORK:
+            menu = Gtk.Menu()
+            mi_edit = Gtk.MenuItem(label="Edit work\u2026")
+            mi_edit.connect("activate", lambda *_: self._edit_work(key))
+            menu.append(mi_edit)
+            mi_add = Gtk.MenuItem(label="Add work\u2026")
+            mi_add.connect("activate", lambda *_: self._add_work())
+            menu.append(mi_add)
+        if menu:
+            menu.show_all()
+            menu.popup_at_pointer(event)
+            return True
+        return False
 
     def _selected_work_key(self):
         model, it = self.side_view.get_selection().get_selected()
@@ -145,12 +180,7 @@ class CatalogueTab(Gtk.Box):
             return model[it][3]
         return None
 
-    def _on_edit_selected_work(self, _btn):
-        key = self._selected_work_key()
-        if key:
-            self._edit_work(key)
-
-    def _on_add_work(self, _btn):
+    def _add_work(self):
         if not self.workspace:
             return
         dlg = Gtk.Dialog(title="New Work", transient_for=self.get_toplevel(),
@@ -203,13 +233,22 @@ class CatalogueTab(Gtk.Box):
 
         sw = Gtk.ScrolledWindow()
         sw.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-        # columns: bibliotheca_id, author, year, title, type
-        self.master_store = Gtk.ListStore(str, str, str, str, str)
+        # columns: pdf_icon, bibliotheca_id, author, year, title, type
+        self.master_store = Gtk.ListStore(str, str, str, str, str, str)
         self.master_filter = self.master_store.filter_new()
         self.master_filter.set_visible_func(self._filter_visible)
         self.master_view = Gtk.TreeView(model=self.master_filter)
-        for i, title in enumerate(
-                ["Bibliotheca ID", "Author", "Year", "Title", "Type"]):
+
+        # PDF indicator column (icon only)
+        pdf_r = Gtk.CellRendererPixbuf()
+        pdf_col = Gtk.TreeViewColumn("", pdf_r, icon_name=0)
+        pdf_col.set_fixed_width(28)
+        pdf_col.set_sizing(Gtk.TreeViewColumnSizing.FIXED)
+        self.master_view.append_column(pdf_col)
+
+        text_cols = ["Bibliotheca ID", "Author", "Year", "Title", "Type"]
+        for offset, title in enumerate(text_cols):
+            i = offset + 1  # store column (0 is the icon)
             r = Gtk.CellRendererText()
             r.set_property("ellipsize", Pango.EllipsizeMode.END)
             c = Gtk.TreeViewColumn(title, r, text=i)
@@ -227,14 +266,17 @@ class CatalogueTab(Gtk.Box):
     def _populate_master(self, records):
         self.master_store.clear()
         for r in records:
+            icon = "application-pdf" if getattr(r, "has_pdf", False) else ""
             self.master_store.append(
-                [r.bibliotheca_id, r.author, r.year, r.title, r.type_label])
+                [icon, r.bibliotheca_id, r.author, r.year, r.title,
+                 r.type_label])
 
     def _filter_visible(self, model, it, _data):
         needle = self.search.get_text().strip().lower()
         if not needle:
             return True
-        for col in range(5):
+        # search only the text columns (skip the icon column 0)
+        for col in range(1, 6):
             val = model[it][col] or ""
             if needle in val.lower():
                 return True
@@ -249,7 +291,7 @@ class CatalogueTab(Gtk.Box):
             self._current_record = None
             self.emit("selection-changed", False)
             return
-        bid = model[it][0]
+        bid = model[it][1]
         rec = self.workspace.get(bid) if self.workspace else None
         if rec:
             self._show_detail(rec)
@@ -287,6 +329,24 @@ class CatalogueTab(Gtk.Box):
         btn_box.pack_start(self.copy_plain_btn, False, False, 0)
         box.pack_start(btn_box, False, False, 4)
 
+        # full-text row
+        ft_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self.set_pdf_btn = Gtk.Button(label="Set PDF\u2026")
+        self.set_pdf_btn.set_tooltip_text(
+            "Choose the PDF for this article (opens at your full-text library)")
+        self.set_pdf_btn.connect("clicked", lambda _b: self._set_fulltext("pdf"))
+        self.set_epub_btn = Gtk.Button(label="Set EPUB\u2026")
+        self.set_epub_btn.connect("clicked",
+                                  lambda _b: self._set_fulltext("epub"))
+        self.clear_ft_btn = Gtk.Button(label="Clear")
+        self.clear_ft_btn.set_tooltip_text("Clear the full-text paths")
+        self.clear_ft_btn.connect("clicked", self._clear_fulltext)
+        ft_box.pack_start(Gtk.Label(label="Full-text:"), False, False, 0)
+        ft_box.pack_start(self.set_pdf_btn, False, False, 0)
+        ft_box.pack_start(self.set_epub_btn, False, False, 0)
+        ft_box.pack_start(self.clear_ft_btn, False, False, 0)
+        box.pack_start(ft_box, False, False, 0)
+
         notes_lbl = Gtk.Label(xalign=0)
         notes_lbl.set_markup("<b>My notes (Markdown)</b>")
         box.pack_start(notes_lbl, False, False, 2)
@@ -309,7 +369,8 @@ class CatalogueTab(Gtk.Box):
         return box
 
     def _set_detail_sensitive(self, on):
-        for w in (self.copy_rich_btn, self.copy_plain_btn, self.notes_view):
+        for w in (self.copy_rich_btn, self.copy_plain_btn, self.notes_view,
+                  self.set_pdf_btn, self.set_epub_btn, self.clear_ft_btn):
             w.set_sensitive(on)
 
     def _show_detail(self, rec):
@@ -329,6 +390,13 @@ class CatalogueTab(Gtk.Box):
         self._suppress_notes_save = False
         self._set_detail_sensitive(True)
 
+        self._refresh_detail_status(rec)
+
+    def _refresh_detail_status(self, rec):
+        """Update the status line under the notes box from the record's
+        current frontmatter (re-read from disk so it reflects recent writes)."""
+        fm, _ = rec.read_notes()
+        self._current_frontmatter = fm
         extras = []
         if fm.get("pdf"):
             extras.append("PDF")
@@ -387,6 +455,89 @@ class CatalogueTab(Gtk.Box):
         clip.store()
 
     # ------------------------------------------------------------------
+    # Full-text (PDF/EPUB)
+    # ------------------------------------------------------------------
+    def _set_fulltext(self, kind):
+        rec = self._current_record
+        if not rec or not self.workspace:
+            return
+        # persist any pending notes-body edits first, so the fulltext write
+        # (which rewrites the frontmatter) does not clobber unsaved notes.
+        self._flush_notes()
+        label = kind.upper()
+        dlg = Gtk.FileChooserDialog(
+            title=f"Select {label} for {rec.bibliotheca_id}",
+            transient_for=self.get_toplevel(),
+            action=Gtk.FileChooserAction.OPEN)
+        dlg.add_buttons("_Cancel", Gtk.ResponseType.CANCEL,
+                        "_Select", Gtk.ResponseType.OK)
+        # open at the full-text library by default
+        if self._fulltext_root and Path(self._fulltext_root).is_dir():
+            dlg.set_current_folder(self._fulltext_root)
+        flt = Gtk.FileFilter()
+        flt.set_name(f"{label} files")
+        flt.add_pattern(f"*.{kind}")
+        dlg.add_filter(flt)
+        all_flt = Gtk.FileFilter()
+        all_flt.set_name("All files")
+        all_flt.add_pattern("*")
+        dlg.add_filter(all_flt)
+
+        if dlg.run() != Gtk.ResponseType.OK:
+            dlg.destroy()
+            return
+        chosen = dlg.get_filename()
+        dlg.destroy()
+
+        outside = False
+        if self._fulltext_root:
+            try:
+                Path(chosen).resolve().relative_to(
+                    Path(self._fulltext_root).resolve())
+            except ValueError:
+                outside = True
+
+        self.workspace.set_fulltext_path(rec.bibliotheca_id, kind, chosen,
+                                         self._fulltext_root)
+        self._after_fulltext_change(rec)
+        if outside:
+            self._warn_outside_library(label)
+
+    def _clear_fulltext(self, _btn):
+        rec = self._current_record
+        if not rec or not self.workspace:
+            return
+        self._flush_notes()
+        for kind in ("pdf", "epub"):
+            self.workspace.set_fulltext_path(rec.bibliotheca_id, kind, None,
+                                             self._fulltext_root)
+        self._after_fulltext_change(rec)
+
+    def _after_fulltext_change(self, rec):
+        # refresh detail status + the master row's PDF icon
+        self._refresh_detail_status(rec)
+        self._update_row_pdf_icon(rec)
+
+    def _update_row_pdf_icon(self, rec):
+        icon = "application-pdf" if rec.has_pdf else ""
+        for row in self.master_store:
+            if row[1] == rec.bibliotheca_id:
+                row[0] = icon
+                break
+
+    def _warn_outside_library(self, label):
+        dlg = Gtk.MessageDialog(
+            transient_for=self.get_toplevel(), modal=True,
+            message_type=Gtk.MessageType.INFO, buttons=Gtk.ButtonsType.OK,
+            text=f"The {label} is outside your full-text library folder.")
+        dlg.format_secondary_text(
+            "Its absolute path was stored instead of a relative one. To keep "
+            "paths portable, place full-text files inside the library folder "
+            "set in Preferences.")
+        dlg.run()
+        dlg.destroy()
+
+    # ------------------------------------------------------------------
     # Public
     # ------------------------------------------------------------------
     def set_workspace(self, workspace):
@@ -414,7 +565,7 @@ class CatalogueTab(Gtk.Box):
         self._active_filter = (NODE_ALL, "")
         self._populate_master(self.workspace.all_records())
         for row in self.master_filter:
-            if row[0] == bibliotheca_id:
+            if row[1] == bibliotheca_id:
                 self.master_view.get_selection().select_iter(row.iter)
                 path = row.path
                 self.master_view.scroll_to_cell(path, None, True, 0.5, 0)
@@ -449,6 +600,31 @@ class CatalogueTab(Gtk.Box):
 
     def set_autosave(self, on):
         self._autosave = bool(on)
+
+    def set_fulltext_root(self, path):
+        self._fulltext_root = path or None
+
+    def refresh_starred_authors(self):
+        """Rebuild the sidebar so the Starred Authors section reflects
+        changes made in the Authors tab."""
+        self._rebuild_sidebar()
+
+    def show_author_works(self, author_id):
+        """Filter the master list to a given author's works and select the
+        matching sidebar node if the author is starred (else just filter)."""
+        if not self.workspace:
+            return
+        self._apply_filter(NODE_AUTHOR, author_id)
+        # try to reflect selection in the sidebar for starred authors
+        for row in self.side_store:
+            self._select_author_row(row, author_id)
+
+    def _select_author_row(self, parent_row, author_id):
+        for child in parent_row.iterchildren():
+            if child[2] == NODE_AUTHOR and child[3] == author_id:
+                self.side_view.get_selection().select_iter(child.iter)
+                return True
+        return False
 
 
 # ----------------------------------------------------------------------

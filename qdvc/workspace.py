@@ -24,7 +24,7 @@ import yaml
 from . import apa
 
 INDEX_FILENAME = ".qdvc-index.json"
-INDEX_VERSION = 2
+INDEX_VERSION = 3
 
 _BIB_ENTRY_RE = re.compile(r"@(\w+)\s*\{", re.IGNORECASE)
 _FIELD_RE = re.compile(r"(\w+)\s*=\s*", re.IGNORECASE)
@@ -178,6 +178,9 @@ class Record:
     title: str = ""
     journal: str = ""
     doi: str = ""
+    # full-text presence, cached in the index (paths live in the .md file):
+    has_pdf: bool = False
+    has_epub: bool = False
     # lazily populated:
     _bib: dict | None = field(default=None, repr=False)
 
@@ -221,16 +224,48 @@ class MyWork:
         os.replace(tmp, p)
 
 
-# ---------------------------------------------------------------------------
-# Workspace
-# ---------------------------------------------------------------------------
+@dataclass
+class Author:
+    author_id: str            # SURNAME_GivenNames
+    surname: str
+    given_names: str
+    starred: bool = False
+    path: str = ""            # authors/<author_id>.yml
+    # populated at load time, not persisted:
+    record_ids: list[str] = field(default_factory=list)
+
+    @property
+    def display_name(self) -> str:
+        if self.given_names:
+            return f"{self.surname}, {self.given_names}"
+        return self.surname
+
+    def to_yaml_dict(self) -> dict:
+        return {
+            "id": self.author_id,
+            "surname": self.surname,
+            "given_names": self.given_names,
+            "starred": bool(self.starred),
+        }
+
+    def save(self) -> None:
+        p = Path(self.path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        text = yaml.safe_dump(self.to_yaml_dict(), sort_keys=True,
+                              allow_unicode=True)
+        tmp = p.with_suffix(p.suffix + ".tmp")
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, p)
 
 class Workspace:
     def __init__(self, root: str | Path):
         self.root = Path(root)
         self.records: dict[str, Record] = {}
         self.my_works: dict[str, MyWork] = {}
+        self.authors: dict[str, Author] = {}
         self._doi_index: dict[str, str] = {}  # doi(lower) -> bibliotheca_id
+        # author_id -> list of bibliotheca_ids
+        self._author_records: dict[str, list[str]] = {}
 
     # --- paths -----------------------------------------------------------
     @property
@@ -244,6 +279,10 @@ class Workspace:
     @property
     def my_works_dir(self) -> Path:
         return self.root / "my_works"
+
+    @property
+    def authors_dir(self) -> Path:
+        return self.root / "authors"
 
     @property
     def index_path(self) -> Path:
@@ -272,10 +311,12 @@ class Workspace:
         if not force_rescan and self._load_index():
             self._load_my_works()
             self._build_doi_index()
+            self._derive_authors()
             return
         self._scan()
         self._load_my_works()
         self._build_doi_index()
+        self._derive_authors()
         self._save_index()
 
     def _scan(self) -> None:
@@ -287,6 +328,11 @@ class Workspace:
             bid = bib_file.stem
             md = self.md_path_for(bid)
             e = parse_bibtex(bib_file)
+            has_pdf = has_epub = False
+            if md.exists():
+                fm, _ = parse_markdown(md)
+                has_pdf = bool(fm.get("pdf"))
+                has_epub = bool(fm.get("epub"))
             rec = Record(
                 bibliotheca_id=bid,
                 bib_path=str(bib_file),
@@ -299,6 +345,8 @@ class Workspace:
                 journal=apa._clean(e.get("journal") or e.get("journaltitle")
                                    or e.get("booktitle")),
                 doi=_normalise_doi(e.get("doi")),
+                has_pdf=has_pdf,
+                has_epub=has_epub,
             )
             rec._bib = e
             self.records[bid] = rec
@@ -330,6 +378,8 @@ class Workspace:
                 title=item.get("title", ""),
                 journal=item.get("journal", ""),
                 doi=item.get("doi", ""),
+                has_pdf=bool(item.get("has_pdf", False)),
+                has_epub=bool(item.get("has_epub", False)),
             )
             self.records[rec.bibliotheca_id] = rec
         return bool(self.records)
@@ -349,6 +399,8 @@ class Workspace:
                     "title": r.title,
                     "journal": r.journal,
                     "doi": r.doi,
+                    "has_pdf": r.has_pdf,
+                    "has_epub": r.has_epub,
                 }
                 for r in self.records.values()
             ],
@@ -390,6 +442,97 @@ class Workspace:
             if rec.doi:
                 self._doi_index[rec.doi.lower()] = bid
 
+    # --- authors ---------------------------------------------------------
+    def _load_author_files(self) -> dict[str, Author]:
+        """Load persisted author records (id -> Author), if any."""
+        loaded: dict[str, Author] = {}
+        d = self.authors_dir
+        if not d.is_dir():
+            return loaded
+        for f in sorted(d.glob("*.yml")) + sorted(d.glob("*.yaml")):
+            try:
+                data = yaml.safe_load(f.read_text(encoding="utf-8")) or {}
+            except (OSError, yaml.YAMLError):
+                data = {}
+            if not isinstance(data, dict):
+                continue
+            aid = str(data.get("id") or f.stem)
+            loaded[aid] = Author(
+                author_id=aid,
+                surname=str(data.get("surname", "")),
+                given_names=str(data.get("given_names", "")),
+                starred=bool(data.get("starred", False)),
+                path=str(f),
+            )
+        return loaded
+
+    def _derive_authors(self) -> None:
+        """Derive unique authors from records, merge with persisted records,
+        persist any newly-discovered authors, and build the author->records
+        index. Starred state from existing files is preserved."""
+        persisted = self._load_author_files()
+        self.authors = {}
+        self._author_records = {}
+
+        for bid, rec in self.records.items():
+            seen_in_this_record = set()
+            for surname, given in apa.author_tokens(rec.author):
+                aid = make_author_id(surname, given)
+                if not aid:
+                    continue
+                if aid not in self.authors:
+                    existing = persisted.get(aid)
+                    if existing is not None:
+                        author = existing
+                    else:
+                        author = Author(
+                            author_id=aid,
+                            surname=surname,
+                            given_names=given,
+                            starred=False,
+                            path=str(self.authors_dir / f"{aid}.yml"),
+                        )
+                    self.authors[aid] = author
+                    self._author_records[aid] = []
+                # avoid double-counting a record if an author appears twice
+                if bid not in seen_in_this_record:
+                    self._author_records[aid].append(bid)
+                    seen_in_this_record.add(aid)
+
+        # persist any authors that do not yet have a file on disk
+        for aid, author in self.authors.items():
+            if not author.path:
+                author.path = str(self.authors_dir / f"{aid}.yml")
+            if not Path(author.path).exists():
+                try:
+                    author.save()
+                except OSError:
+                    pass
+            author.record_ids = sorted(self._author_records.get(aid, []),
+                                       key=str.lower)
+
+    def all_authors(self) -> list[Author]:
+        return sorted(self.authors.values(),
+                      key=lambda a: (a.surname.lower(),
+                                     a.given_names.lower()))
+
+    def starred_authors(self) -> list[Author]:
+        return [a for a in self.all_authors() if a.starred]
+
+    def set_author_starred(self, author_id: str, starred: bool) -> None:
+        author = self.authors.get(author_id)
+        if not author:
+            return
+        author.starred = bool(starred)
+        if not author.path:
+            author.path = str(self.authors_dir / f"{author_id}.yml")
+        author.save()
+
+    def records_for_author(self, author_id: str) -> list["Record"]:
+        ids = self._author_records.get(author_id, [])
+        recs = [self.records[i] for i in ids if i in self.records]
+        return sorted(recs, key=lambda r: r.bibliotheca_id.lower())
+
     # --- queries ---------------------------------------------------------
     def all_records(self) -> list[Record]:
         return sorted(self.records.values(),
@@ -412,15 +555,18 @@ class Workspace:
 
     # --- mutations -------------------------------------------------------
     def import_bib_file(self, source: str | Path) -> list[str]:
-        """Import a .bib file that may contain one or more entries.
+        """Import a .bib file that may contain one or more entries."""
+        text = Path(source).read_text(encoding="utf-8", errors="replace")
+        return self.import_bib_text(text)
+
+    def import_bib_text(self, text: str) -> list[str]:
+        """Import BibTeX from a raw string that may contain several entries.
 
         Each entry is filed under bibtex/<shard>/<bibliotheca_id>.bib using
         its citation key as the bibliotheca_id. Returns the list of imported
         ids. Existing ids are skipped (not overwritten).
         """
-        source = Path(source)
-        text = source.read_text(encoding="utf-8", errors="replace")
-        entries = _split_bib_entries(text)
+        entries = _split_bib_entries(text or "")
         imported: list[str] = []
         for raw_entry, key in entries:
             if not key:
@@ -450,6 +596,7 @@ class Workspace:
             imported.append(bid)
         if imported:
             self._build_doi_index()
+            self._derive_authors()
             self._save_index()
         return imported
 
@@ -506,6 +653,7 @@ class Workspace:
                 work.save()
 
         self._build_doi_index()
+        self._derive_authors()
         self._save_index()
 
     def create_my_work(self, name: str) -> "MyWork":
@@ -523,8 +671,69 @@ class Workspace:
         self.my_works[candidate] = work
         return work
 
+    # --- full-text (PDF/EPUB) --------------------------------------------
+    def set_fulltext_path(self, bibliotheca_id: str, kind: str,
+                          abs_path: str | None,
+                          storage_root: str | None) -> None:
+        """Store a full-text path for a record in its markdown frontmatter.
+
+        `kind` is 'pdf' or 'epub'. The path is stored relative to
+        `storage_root` when the file lies inside it; otherwise the absolute
+        path is stored (with a warning left to the caller). Passing
+        abs_path=None clears the entry.
+        """
+        kind = kind.lower()
+        if kind not in ("pdf", "epub"):
+            raise ValueError("kind must be 'pdf' or 'epub'")
+        rec = self.records.get(bibliotheca_id)
+        if not rec:
+            raise ValueError(f"No record named '{bibliotheca_id}'.")
+
+        md_path = Path(rec.md_path) if rec.md_path \
+            else self.md_path_for(bibliotheca_id)
+        fm, body = parse_markdown(md_path) if md_path.exists() else ({}, "")
+
+        if abs_path:
+            stored = abs_path
+            if storage_root:
+                try:
+                    rel = Path(abs_path).resolve().relative_to(
+                        Path(storage_root).resolve())
+                    stored = str(rel)
+                except ValueError:
+                    # file is outside the storage root; keep absolute
+                    stored = str(Path(abs_path).resolve())
+            fm[kind] = stored
+        else:
+            fm.pop(kind, None)
+
+        write_markdown(md_path, fm, body)
+        rec.md_path = str(md_path)
+        if kind == "pdf":
+            rec.has_pdf = bool(abs_path)
+        else:
+            rec.has_epub = bool(abs_path)
+        self._save_index()
+
+    def resolve_fulltext_path(self, bibliotheca_id: str, kind: str,
+                              storage_root: str | None) -> str | None:
+        """Return the absolute path of a record's full-text file, if set."""
+        rec = self.records.get(bibliotheca_id)
+        if not rec or not rec.md_path:
+            return None
+        fm, _ = parse_markdown(Path(rec.md_path))
+        stored = fm.get(kind.lower())
+        if not stored:
+            return None
+        p = Path(stored)
+        if p.is_absolute():
+            return str(p)
+        if storage_root:
+            return str((Path(storage_root) / p).resolve())
+        return str(p)
+
     # --- validation ------------------------------------------------------
-    def validate(self) -> dict:
+    def validate(self, storage_root: str | None = None) -> dict:
         """Return a report of workspace integrity problems."""
         report = {
             "orphan_markdown": [],       # .md without matching .bib
@@ -547,9 +756,15 @@ class Workspace:
                 continue
             fm, _ = parse_markdown(Path(rec.md_path))
             for kind in ("pdf", "epub"):
-                p = fm.get(kind)
-                if p and not Path(p).exists():
-                    report["missing_fulltext"].append((bid, kind.upper(), p))
+                stored = fm.get(kind)
+                if not stored:
+                    continue
+                p = Path(stored)
+                if not p.is_absolute() and storage_root:
+                    p = Path(storage_root) / p
+                if not p.exists():
+                    report["missing_fulltext"].append(
+                        (bid, kind.upper(), stored))
 
         # dangling my_works citations / published_as
         for work in self.my_works.values():
@@ -590,6 +805,24 @@ def _sanitise_id(text: str) -> str:
     text = re.sub(r"\s+", "_", text)
     text = _ID_ALLOWED_RE.sub("", text)
     return text.strip("_-")
+
+
+def make_author_id(surname: str, given_names: str) -> str:
+    """Build a stable author id of the form SURNAME_GivenNames.
+
+    Surname is upper-cased; given names keep their case. Non-alphanumeric
+    characters (spaces, dots, hyphens inside names) are removed so the id is a
+    safe filename. Returns '' if there is no surname.
+    """
+    surname = (surname or "").strip()
+    given_names = (given_names or "").strip()
+    if not surname:
+        return ""
+    sur = re.sub(r"[^A-Za-z0-9]+", "", surname).upper()
+    giv = re.sub(r"[^A-Za-z0-9]+", "", given_names.title())
+    if not sur:
+        return ""
+    return f"{sur}_{giv}" if giv else sur
 
 
 def _split_bib_entries(text: str) -> list[tuple[str, str]]:

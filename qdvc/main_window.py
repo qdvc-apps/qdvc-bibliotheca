@@ -15,6 +15,7 @@ from . import APP_NAME, __version__
 from .workspace import Workspace
 from .catalogue_tab import CatalogueTab
 from .doi_tab import DoiLookupTab
+from .authors_tab import AuthorsTab
 from .preferences import PreferencesDialog
 
 
@@ -67,8 +68,13 @@ class MainWindow(Gtk.ApplicationWindow):
                                self._on_catalogue_selection)
         self.doi_tab = DoiLookupTab()
         self.doi_tab.connect("goto-record", self._on_goto_record)
+        self.authors_tab = AuthorsTab()
+        self.authors_tab.connect("show-author-works",
+                                 self._on_show_author_works)
+        self.authors_tab.connect("star-changed", self._on_author_star_changed)
 
         self.notebook.append_page(self.catalogue, Gtk.Label(label="Catalogue"))
+        self.notebook.append_page(self.authors_tab, Gtk.Label(label="Authors"))
         self.notebook.append_page(self.doi_tab, Gtk.Label(label="DOI Lookup"))
 
         self.statusbar = Gtk.Statusbar()
@@ -168,9 +174,15 @@ class MainWindow(Gtk.ApplicationWindow):
         self._accel(mi_cat, Gdk.KEY_1, Gdk.ModifierType.MOD1_MASK)
         menu.append(mi_cat)
 
+        mi_auth = _menu_item("Authors Tab")
+        mi_auth.connect("activate",
+                        lambda *_: self.notebook.set_current_page(1))
+        self._accel(mi_auth, Gdk.KEY_2, Gdk.ModifierType.MOD1_MASK)
+        menu.append(mi_auth)
+
         mi_doi = _menu_item("DOI Lookup Tab")
-        mi_doi.connect("activate", lambda *_: self.notebook.set_current_page(1))
-        self._accel(mi_doi, Gdk.KEY_2, Gdk.ModifierType.MOD1_MASK)
+        mi_doi.connect("activate", lambda *_: self.notebook.set_current_page(2))
+        self._accel(mi_doi, Gdk.KEY_3, Gdk.ModifierType.MOD1_MASK)
         menu.append(mi_doi)
 
         menu.append(Gtk.SeparatorMenuItem())
@@ -301,7 +313,10 @@ class MainWindow(Gtk.ApplicationWindow):
             self._warn(f"Failed to open workspace:\n{exc}")
             return
         self.workspace = ws
+        self.catalogue.set_fulltext_root(
+            self.config.get("fulltext_library_path", "") or None)
         self.catalogue.set_workspace(ws)
+        self.authors_tab.set_workspace(ws)
         self.doi_tab.set_workspace(ws)
         self.config.last_workspace = path
         self.config.push_recent(path)
@@ -310,10 +325,12 @@ class MainWindow(Gtk.ApplicationWindow):
         self._update_actions_sensitivity()
         self._update_title()
         self._set_status(f"Opened {path} \u2014 {len(ws.records)} records, "
-                         f"{len(ws.my_works)} works.")
+                         f"{len(ws.my_works)} works, "
+                         f"{len(ws.authors)} authors.")
 
     def _on_close_workspace(self, _item):
         self.catalogue.set_workspace(None)
+        self.authors_tab.set_workspace(None)
         self.doi_tab.set_workspace(None)
         self.workspace = None
         self.config.last_workspace = None
@@ -327,6 +344,7 @@ class MainWindow(Gtk.ApplicationWindow):
             return
         self.workspace.load(force_rescan=True)
         self.catalogue.set_workspace(self.workspace)
+        self.authors_tab.set_workspace(self.workspace)
         self.doi_tab.set_workspace(self.workspace)
         self._set_status(
             f"Rescanned \u2014 {len(self.workspace.records)} records.")
@@ -338,33 +356,24 @@ class MainWindow(Gtk.ApplicationWindow):
         if not self.workspace:
             self._warn("Open a workspace first.")
             return
-        dialog = Gtk.FileChooserDialog(
-            title="Import BibTeX file(s)", parent=self,
-            action=Gtk.FileChooserAction.OPEN)
-        dialog.add_buttons("_Cancel", Gtk.ResponseType.CANCEL,
-                           "_Import", Gtk.ResponseType.OK)
-        dialog.set_select_multiple(True)
-        flt = Gtk.FileFilter()
-        flt.set_name("BibTeX files (*.bib)")
-        flt.add_pattern("*.bib")
-        dialog.add_filter(flt)
-        if dialog.run() != Gtk.ResponseType.OK:
-            dialog.destroy()
+        dlg = ImportDialog(self)
+        resp = dlg.run()
+        if resp != Gtk.ResponseType.OK:
+            dlg.destroy()
             return
-        files = dialog.get_filenames()
-        dialog.destroy()
-        total = []
-        errors = []
-        for f in files:
-            try:
-                total.extend(self.workspace.import_bib_file(f))
-            except Exception as exc:  # noqa: BLE001
-                errors.append(f"{Path(f).name}: {exc}")
+        text = dlg.get_bibtex_text()
+        dlg.destroy()
+        if not text.strip():
+            self._set_status("Nothing to import.")
+            return
+        try:
+            imported = self.workspace.import_bib_text(text)
+        except Exception as exc:  # noqa: BLE001
+            self._warn(f"Import failed:\n{exc}")
+            return
         self.catalogue.set_workspace(self.workspace)
-        if errors:
-            self._warn("Some files could not be imported:\n" +
-                       "\n".join(errors))
-        self._set_status(f"Imported {len(total)} record(s).")
+        self.authors_tab.set_workspace(self.workspace)
+        self._set_status(f"Imported {len(imported)} record(s).")
 
     # ==================================================================
     # Preferences
@@ -380,6 +389,8 @@ class MainWindow(Gtk.ApplicationWindow):
         font = self.config.get("notes_font", "Monospace 10")
         self.catalogue.set_notes_font(font)
         self.catalogue.set_autosave(self.config.get("autosave_notes", True))
+        self.catalogue.set_fulltext_root(
+            self.config.get("fulltext_library_path", "") or None)
 
     # ==================================================================
     # View toggles / refresh
@@ -474,7 +485,8 @@ class MainWindow(Gtk.ApplicationWindow):
         if not self.workspace:
             self._warn("Open a workspace first.")
             return
-        report = self.workspace.validate()
+        report = self.workspace.validate(
+            self.config.get("fulltext_library_path", "") or None)
         self._show_validation_report(report)
 
     def _show_validation_report(self, report):
@@ -581,6 +593,15 @@ class MainWindow(Gtk.ApplicationWindow):
             self._set_status(
                 f"Record {bibliotheca_id} not found in current view.")
 
+    def _on_show_author_works(self, _tab, author_id):
+        # jump to the Catalogue tab and filter by this author
+        self.notebook.set_current_page(0)
+        self.catalogue.show_author_works(author_id)
+
+    def _on_author_star_changed(self, _tab, _author_id, _starred):
+        # the Catalogue sidebar's Starred Authors section must be rebuilt
+        self.catalogue.refresh_starred_authors()
+
     # ==================================================================
     # Lifecycle / helpers
     # ==================================================================
@@ -624,3 +645,84 @@ class MainWindow(Gtk.ApplicationWindow):
                                 buttons=Gtk.ButtonsType.OK, text=message)
         dlg.run()
         dlg.destroy()
+
+
+class ImportDialog(Gtk.Dialog):
+    """Import BibTeX either by pasting text or by choosing a .bib file.
+
+    Choosing a file loads its contents into the text area, so the user can
+    review/edit before importing; the import always uses the text area.
+    """
+
+    def __init__(self, parent):
+        super().__init__(title="Import BibTeX", transient_for=parent,
+                         modal=True)
+        self.add_button("_Cancel", Gtk.ResponseType.CANCEL)
+        self.import_btn = self.add_button("_Import", Gtk.ResponseType.OK)
+        self.set_default_response(Gtk.ResponseType.OK)
+        self.set_default_size(600, 460)
+
+        area = self.get_content_area()
+        area.set_border_width(10)
+        area.set_spacing(6)
+
+        info = Gtk.Label(xalign=0)
+        info.set_markup(
+            "Paste BibTeX below, or load a <tt>.bib</tt> file. Multiple "
+            "entries are supported; each is filed by its citation key.")
+        info.set_line_wrap(True)
+        area.pack_start(info, False, False, 0)
+
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        choose = Gtk.Button.new_from_icon_name("document-open",
+                                               Gtk.IconSize.BUTTON)
+        choose.set_label("Choose file\u2026")
+        choose.set_always_show_image(True)
+        choose.connect("clicked", self._on_choose_file)
+        row.pack_start(choose, False, False, 0)
+        self.file_label = Gtk.Label(xalign=0)
+        self.file_label.get_style_context().add_class("dim-label")
+        row.pack_start(self.file_label, True, True, 0)
+        area.pack_start(row, False, False, 0)
+
+        sw = Gtk.ScrolledWindow()
+        sw.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        self.textview = Gtk.TextView()
+        self.textview.set_monospace(True)
+        self.textview.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        self.buffer = self.textview.get_buffer()
+        sw.add(self.textview)
+        area.pack_start(sw, True, True, 0)
+
+        self.show_all()
+
+    def _on_choose_file(self, _btn):
+        dlg = Gtk.FileChooserDialog(
+            title="Choose a .bib file", transient_for=self,
+            action=Gtk.FileChooserAction.OPEN)
+        dlg.add_buttons("_Cancel", Gtk.ResponseType.CANCEL,
+                        "_Open", Gtk.ResponseType.OK)
+        flt = Gtk.FileFilter()
+        flt.set_name("BibTeX files (*.bib)")
+        flt.add_pattern("*.bib")
+        dlg.add_filter(flt)
+        all_flt = Gtk.FileFilter()
+        all_flt.set_name("All files")
+        all_flt.add_pattern("*")
+        dlg.add_filter(all_flt)
+        if dlg.run() == Gtk.ResponseType.OK:
+            path = dlg.get_filename()
+            dlg.destroy()
+            try:
+                text = Path(path).read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                self.file_label.set_text(f"Could not read: {exc}")
+                return
+            self.buffer.set_text(text)
+            self.file_label.set_text(Path(path).name)
+        else:
+            dlg.destroy()
+
+    def get_bibtex_text(self):
+        start, end = self.buffer.get_bounds()
+        return self.buffer.get_text(start, end, True)
