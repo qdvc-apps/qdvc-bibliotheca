@@ -44,18 +44,11 @@ class MainWindow(Gtk.ApplicationWindow):
         self.workspace = None
 
         # Icon shown in the window frame and (with a matching StartupWMClass in
-        # the .desktop file) in the MATE panel / taskbar. The application-level
-        # default is installed in app.install_default_icon(); we also set it on
-        # this window explicitly so the taskbar has a per-window icon.
+        # the .desktop file) in the MATE panel / taskbar. We use a standard
+        # themed icon name directly, so it appears even before any .desktop
+        # matching and without bundling an icon file.
         try:
-            self.set_icon_name("qdvc-bibliotheca")
-            if not self.get_icon() and not self.get_icon_name():
-                from .app import bundled_icon_path
-                from gi.repository import GdkPixbuf
-                p = bundled_icon_path()
-                if p:
-                    self.set_icon(GdkPixbuf.Pixbuf.new_from_file_at_size(
-                        p, 64, 64))
+            self.set_icon_name("accessories-dictionary")
         except Exception:  # noqa: BLE001
             pass
 
