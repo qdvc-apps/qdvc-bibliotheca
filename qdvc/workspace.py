@@ -731,6 +731,27 @@ class Workspace:
         self.my_works[candidate] = work
         return work
 
+    def allocate_to_work(self, work_key: str,
+                         bibliotheca_ids: list[str]) -> int:
+        """Add one or more records to a work's citation list.
+
+        The work file is kept canonical (name-first, cites de-duplicated and
+        alphabetised) by MyWork.save. Returns the number of ids newly added.
+        """
+        work = self.my_works.get(work_key)
+        if not work:
+            raise ValueError(f"No work named '{work_key}'.")
+        existing = set(work.cites)
+        added = 0
+        for bid in bibliotheca_ids:
+            if bid and bid not in existing:
+                work.cites.append(bid)
+                existing.add(bid)
+                added += 1
+        if added:
+            work.save()
+        return added
+
     # --- full-text (PDF/EPUB) --------------------------------------------
     def set_fulltext_path(self, bibliotheca_id: str, kind: str,
                           abs_path: str | None,

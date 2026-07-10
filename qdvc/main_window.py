@@ -402,12 +402,18 @@ class MainWindow(Gtk.ApplicationWindow):
         if not self.workspace:
             self._warn("Open a workspace first.")
             return
-        dlg = ImportDialog(self)
+        # If the user is viewing a "my work" in the Catalogue, pre-select it.
+        preselect = None
+        if self.notebook.get_current_page() == 0:
+            preselect = self.catalogue.current_work_key()
+        dlg = ImportDialog(self, workspace=self.workspace,
+                           preselect_work_key=preselect)
         resp = dlg.run()
         if resp != Gtk.ResponseType.OK:
             dlg.destroy()
             return
         text = dlg.get_bibtex_text()
+        work_key = dlg.allocate_work_key()
         dlg.destroy()
         if not text.strip():
             self._set_status("Nothing to import.")
@@ -419,7 +425,21 @@ class MainWindow(Gtk.ApplicationWindow):
             return
         self.catalogue.set_workspace(self.workspace)
         self.authors_tab.set_workspace(self.workspace)
-        self._set_status(f"Imported {len(imported)} record(s).")
+        # optionally allocate the freshly-imported records to the chosen work
+        allocated = 0
+        if work_key and imported and work_key in self.workspace.my_works:
+            try:
+                allocated = self.workspace.allocate_to_work(work_key, imported)
+                # show that work's view so the user sees the result
+                self.notebook.set_current_page(0)
+                self.catalogue.show_work(work_key)
+            except Exception as exc:  # noqa: BLE001
+                self._warn(f"Imported, but could not allocate:\n{exc}")
+        msg = f"Imported {len(imported)} record(s)."
+        if allocated:
+            name = self.workspace.my_works[work_key].name
+            msg += f" Allocated {allocated} to '{name}'."
+        self._set_status(msg)
 
     # ==================================================================
     # Preferences
@@ -580,6 +600,32 @@ class MainWindow(Gtk.ApplicationWindow):
             self._open_epub()
         elif action == "rename":
             self._on_rename_record(None)
+        elif action == "allocate":
+            self._allocate_records([self._current_record().bibliotheca_id]
+                                   if self._current_record() else [])
+
+    def _allocate_records(self, bibliotheca_ids):
+        """Open the allocation dialog for one or more record ids."""
+        if not self.workspace or not bibliotheca_ids:
+            return
+        from .allocate_dialog import AllocateDialog
+        dlg = AllocateDialog(self, self.workspace, bibliotheca_ids)
+        if dlg.run() == Gtk.ResponseType.OK:
+            try:
+                total = dlg.apply()
+            except Exception as exc:  # noqa: BLE001
+                dlg.destroy()
+                self._warn(f"Could not allocate:\n{exc}")
+                return
+            dlg.destroy()
+            # refresh sidebar (works list may have gained a new work) and the
+            # current view (a My-works filter may now include the record)
+            self.catalogue.refresh_after_allocation()
+            self._set_status(
+                f"Made {total} allocation(s) to My Works."
+                if total else "No new allocations.")
+        else:
+            dlg.destroy()
 
     def _accel_rename(self, _group, _accel, _keyval, _modifier):
         # only when the Catalogue tab is active and a record is selected
@@ -828,13 +874,14 @@ class ImportDialog(Gtk.Dialog):
     review/edit before importing; the import always uses the text area.
     """
 
-    def __init__(self, parent):
+    def __init__(self, parent, workspace=None, preselect_work_key=None):
         super().__init__(title="Import BibTeX", transient_for=parent,
                          modal=True)
+        self.workspace = workspace
         self.add_button("_Cancel", Gtk.ResponseType.CANCEL)
         self.import_btn = self.add_button("_Import", Gtk.ResponseType.OK)
         self.set_default_response(Gtk.ResponseType.OK)
-        self.set_default_size(600, 460)
+        self.set_default_size(600, 480)
 
         area = self.get_content_area()
         area.set_border_width(10)
@@ -868,7 +915,32 @@ class ImportDialog(Gtk.Dialog):
         sw.add(self.textview)
         area.pack_start(sw, True, True, 0)
 
+        # "allocate to a work" dropdown
+        alloc_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        alloc_row.pack_start(
+            Gtk.Label(label="Allocate imported records to:"), False, False, 0)
+        self.work_combo = Gtk.ComboBoxText()
+        # id "" -> the "don't allocate" choice
+        self.work_combo.append("", "(none)")
+        if workspace:
+            for key, work in sorted(workspace.my_works.items(),
+                                    key=lambda kv: kv[1].name.lower()):
+                self.work_combo.append(key, work.name)
+        # preselect the work the user was viewing, else "(none)"
+        if preselect_work_key and workspace \
+                and preselect_work_key in workspace.my_works:
+            self.work_combo.set_active_id(preselect_work_key)
+        else:
+            self.work_combo.set_active_id("")
+        alloc_row.pack_start(self.work_combo, True, True, 0)
+        area.pack_start(alloc_row, False, False, 0)
+
         self.show_all()
+
+    def allocate_work_key(self):
+        """The chosen work key to allocate to, or None for '(none)'."""
+        key = self.work_combo.get_active_id()
+        return key or None
 
     def _on_choose_file(self, _btn):
         dlg = Gtk.FileChooserDialog(

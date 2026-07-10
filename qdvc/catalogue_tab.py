@@ -684,6 +684,12 @@ class CatalogueTab(Gtk.Box):
 
         menu.append(Gtk.SeparatorMenuItem())
 
+        mi = _img_menu_item("Allocate to My Works\u2026", "folder-documents")
+        mi.connect("activate", emit("allocate"))
+        menu.append(mi)
+
+        menu.append(Gtk.SeparatorMenuItem())
+
         # --- Full-text management ---------------------------------------
         mi = _img_menu_item("Set PDF\u2026", "application-pdf")
         mi.connect("activate", lambda *_: self._set_fulltext(rec, "pdf"))
@@ -893,6 +899,25 @@ class CatalogueTab(Gtk.Box):
         changes made in the Authors tab."""
         self._rebuild_sidebar()
 
+    def refresh_after_allocation(self):
+        """Rebuild the sidebar (a new work may exist) and re-apply the current
+        filter so a My-works view reflects newly-allocated records. Preserves
+        the currently selected filter node where possible."""
+        active = self._active_filter
+        self._rebuild_sidebar()
+        # re-apply the previously active filter to keep Pane 2 consistent
+        kind, key = active
+        if kind and kind not in (NODE_TEMP,):
+            self._apply_filter(kind, key)
+
+    def current_work_key(self):
+        """If the active sidebar filter is a 'my work', return its key,
+        else None. Used to pre-select a work in the import dialog."""
+        kind, key = self._active_filter
+        if kind == NODE_WORK:
+            return key
+        return None
+
     def show_author_works(self, author_id):
         """Filter the master list to a given author's works. If the author is
         starred, select their node in the sidebar; otherwise add a transient
@@ -929,6 +954,21 @@ class CatalogueTab(Gtk.Box):
                 self.side_view.get_selection().select_iter(child.iter)
                 return True
         return False
+
+    def show_work(self, work_key):
+        """Select a given 'my work' in the sidebar and filter to it."""
+        if not self.workspace:
+            return
+        if self._temp_iter is not None:
+            self._remove_temp_node()
+        self._rebuild_sidebar()
+        for row in self.side_store:
+            for child in row.iterchildren():
+                if child[2] == NODE_WORK and child[3] == work_key:
+                    self.side_view.get_selection().select_iter(child.iter)
+                    return
+        # fallback: apply the filter directly even if the node wasn't found
+        self._apply_filter(NODE_WORK, work_key)
 
 
 # ----------------------------------------------------------------------

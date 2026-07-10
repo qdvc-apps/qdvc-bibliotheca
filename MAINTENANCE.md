@@ -63,6 +63,7 @@ qdvc/
     preferences.py         Preferences dialog.
     myworks_editor.py      Dialog to edit a "my work" (citations + published_as).
     sort_dialog.py         Dialog to build a multi-key sort specification.
+    allocate_dialog.py     Dialog to allocate record(s) to one or more works.
 ```
 
 ### 3.2 Workspace on disk
@@ -235,6 +236,10 @@ load(force_rescan=False):
   rebuilds authors + index. Raises `ValueError` on empty/invalid/collision.
 - `create_my_work(name)` — sanitises name to a file stem, de-duplicates, writes
   an empty work.
+- `allocate_to_work(work_key, bibliotheca_ids)` — adds one or more records to a
+  work's `cites`, skipping ids already present; saves (canonicalising) only if
+  something was added; returns the count added. Used by the record "Allocate to
+  My Works…" flow and the allocate-after-import option.
 - `set_fulltext_path(id, kind, abs_path|None, storage_root)` — writes the
   `pdf`/`epub` frontmatter **relative to `storage_root`** when the file is
   inside it, else absolute; updates `has_pdf`/`has_epub`; re-saves index.
@@ -371,15 +376,15 @@ Three panes in nested `Gtk.Paned`:
     carries, top to bottom (all via `_img_menu_item`, so all have icons):
     Reveal .bib / Reveal .md in File Manager; Open .bib / Open .md in Text
     Editor; Open PDF; Open EPUB (the last two disabled when that full-text is
-    absent); Copy Bibliotheca ID; Rename Bibliotheca ID…; then the full-text
-    management block Set PDF… / Set EPUB… / Remove full-text link(s). The
-    "reveal/edit/open/rename" items don't act locally — they call
-    `self.emit("record-action", <name>)`, and `MainWindow._on_record_action`
-    routes each to the existing handler acting on the current record. This is
-    the successor to the old menubar **Record** menu, which has been removed.
-    Copy Bibliotheca ID (`_copy_bibliotheca_id`) and the Set/Remove full-text
-    items are handled inside the tab. This right-click menu is the only place
-    to *attach* full-text.
+    absent); Copy Bibliotheca ID; Rename Bibliotheca ID…; Allocate to My
+    Works…; then the full-text management block Set PDF… / Set EPUB… / Remove
+    full-text link(s). The "reveal/edit/open/rename/allocate" items don't act
+    locally — they call `self.emit("record-action", <name>)`, and
+    `MainWindow._on_record_action` routes each to the existing handler acting
+    on the current record. This is the successor to the old menubar **Record**
+    menu, which has been removed. Copy Bibliotheca ID (`_copy_bibliotheca_id`)
+    and the Set/Remove full-text items are handled inside the tab. This
+    right-click menu is the only place to *attach* full-text.
 
 - **Pane 3 (detail)** — read-only APA reference label (Pango markup), Copy
   (rich) / Copy (plain) buttons, an **Open PDF** button (shown enabled only
@@ -440,12 +445,27 @@ the main window routes to the Catalogue (`reveal_record`). On miss, shows
 
 - `ImportDialog` (in `main_window.py`) — paste box + "Choose file…" that loads
   a `.bib` into the same box; import always uses the box text via
-  `import_bib_text`.
+  `import_bib_text`. Carries an "Allocate imported records to:" dropdown
+  (`allocate_work_key` → work key or None) listing every work plus "(none)".
+  `_on_import` passes the workspace and a preselect key: when the user is
+  viewing a "my work" in the Catalogue (`catalogue.current_work_key()`), that
+  work is pre-selected. After a successful import, if a work was chosen the
+  imported ids are allocated to it and the Catalogue navigates to that work's
+  view (`catalogue.show_work`).
+- `AllocateDialog` (`allocate_dialog.py`) — a checklist of existing works
+  (pre-ticked where every selected record is already cited) plus a "new work"
+  entry. `apply()` optionally creates the new work, then calls
+  `Workspace.allocate_to_work` for each ticked work and the new one; returns the
+  total allocations. Invoked from `MainWindow._allocate_records`, which then
+  calls `catalogue.refresh_after_allocation()` (rebuild sidebar + re-apply the
+  active filter). Used both from the record right-click "Allocate to My Works…"
+  and the allocate-after-import path.
 - `PreferencesDialog` — font, file-manager command, full-text library path,
   reopen-last, autosave, toolbar style. `apply()` writes to `Config`;
   `MainWindow._apply_prefs_to_widgets` pushes values into the widgets and calls
   `_apply_toolbar_style`.
-- `MyWorkEditor` — two-list citation picker + name + `published_as` combo.
+- `MyWorkEditor` — two-list citation picker + name + `published_as` combo;
+  keeps its cited list alphabetical and inserts additions at their sorted slot.
 
 ### 8.6 `platform_utils.py`
 

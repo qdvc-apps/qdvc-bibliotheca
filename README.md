@@ -23,11 +23,13 @@ Git or Syncthing.
   Catalogue.
 - **DOI lookup** — paste a DOI and jump straight to the matching record.
 - **My works** — track your own papers/projects and which references each one
-  cites.
+  cites. Allocate any record to one or more works straight from its right-click
+  menu.
 - **Full-text** — attach a PDF or EPUB to any record and open it in your
   system viewer.
 - **Import** — paste BibTeX or load a `.bib` file; multi-entry files are split
-  and filed automatically.
+  and filed automatically, and you can allocate the new records to a work in the
+  same step.
 
 ## Requirements
 
