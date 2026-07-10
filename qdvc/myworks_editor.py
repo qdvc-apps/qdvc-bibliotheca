@@ -109,13 +109,16 @@ class MyWorkEditor(Gtk.Dialog):
         return sw
 
     def _populate(self):
-        cited = [c for c in self.work.cites]
+        cited = sorted({c for c in self.work.cites}, key=str.lower)
         cited_set = set(cited)
         self.cited_store.clear()
         for c in cited:
             self.cited_store.append([c])
+        self._refresh_available(cited_set)
+
+    def _refresh_available(self, cited_set):
         self.avail_store.clear()
-        for bid in self._all_ids:
+        for bid in self._all_ids:  # _all_ids is already sorted
             if bid not in cited_set:
                 self.avail_store.append([bid])
 
@@ -125,30 +128,35 @@ class MyWorkEditor(Gtk.Dialog):
             return True
         return needle in (model[it][0] or "").lower()
 
+    def _insert_cited_sorted(self, bid):
+        """Insert bid into the cited store at its alphabetical position."""
+        low = bid.lower()
+        pos = 0
+        for i, row in enumerate(self.cited_store):
+            if row[0].lower() < low:
+                pos = i + 1
+            else:
+                break
+        self.cited_store.insert(pos, [bid])
+
     def _on_add(self, _btn):
         model, paths = self.avail_view.get_selection().get_selected_rows()
         ids = [model[p][0] for p in paths]
+        existing = {row[0] for row in self.cited_store}
         for bid in ids:
-            self.cited_store.append([bid])
-        # rebuild available to drop the added ones
-        cited_now = {row[0] for row in self.cited_store}
-        self.avail_store.clear()
-        for bid in self._all_ids:
-            if bid not in cited_now:
-                self.avail_store.append([bid])
+            if bid not in existing:
+                self._insert_cited_sorted(bid)
+                existing.add(bid)
+        self._refresh_available(existing)
 
     def _on_remove(self, _btn):
         model, paths = self.cited_view.get_selection().get_selected_rows()
-        removed = [model[p][0] for p in paths]
         for ref in reversed([Gtk.TreeRowReference.new(model, p)
                              for p in paths]):
             it = model.get_iter(ref.get_path())
             model.remove(it)
         cited_now = {row[0] for row in self.cited_store}
-        self.avail_store.clear()
-        for bid in self._all_ids:
-            if bid not in cited_now:
-                self.avail_store.append([bid])
+        self._refresh_available(cited_now)
 
     # ------------------------------------------------------------------
     def apply(self) -> None:
@@ -156,6 +164,7 @@ class MyWorkEditor(Gtk.Dialog):
         self.work.name = self.name_entry.get_text().strip() or self.work.name
         pub = self.pub_combo.get_child().get_text().strip()
         self.work.published_as = pub or None
+        # cited store is already alphabetical; MyWork.save re-canonicalises too.
         self.work.cites = [row[0] for row in self.cited_store]
         self.work.save()
 

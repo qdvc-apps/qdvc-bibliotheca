@@ -73,6 +73,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.catalogue = CatalogueTab()
         self.catalogue.connect("selection-changed",
                                self._on_catalogue_selection)
+        self.catalogue.connect("record-action", self._on_record_action)
         self.doi_tab = DoiLookupTab()
         self.doi_tab.connect("goto-record", self._on_goto_record)
         self.authors_tab = AuthorsTab()
@@ -83,10 +84,18 @@ class MainWindow(Gtk.ApplicationWindow):
         self.notebook.append_page(self.catalogue, Gtk.Label(label="Catalogue"))
         self.notebook.append_page(self.authors_tab, Gtk.Label(label="Authors"))
         self.notebook.append_page(self.doi_tab, Gtk.Label(label="DOI Lookup"))
+        self.notebook.connect("switch-page", self._on_tab_switched)
 
         self.statusbar = Gtk.Statusbar()
         self._sb_ctx = self.statusbar.get_context_id("main")
         root.pack_start(self.statusbar, False, False, 0)
+
+        # F2 renames the selected record. The Record menu was removed (its
+        # actions live in the Catalogue right-click menu), so we bind F2 at the
+        # window level instead of on a menu item.
+        self.accel_group.connect(
+            Gdk.KEY_F2, 0, Gtk.AccelFlags.VISIBLE,
+            self._accel_rename)
 
         self._apply_prefs_to_widgets()
         self._update_actions_sensitivity()
@@ -101,7 +110,6 @@ class MainWindow(Gtk.ApplicationWindow):
         menubar.append(self._file_menu())
         menubar.append(self._edit_menu())
         menubar.append(self._view_menu())
-        menubar.append(self._record_menu())
         menubar.append(self._tools_menu())
         menubar.append(self._help_menu())
         return menubar
@@ -208,50 +216,17 @@ class MainWindow(Gtk.ApplicationWindow):
         mi_refresh.connect("activate", self._on_refresh_view)
         self._accel(mi_refresh, Gdk.KEY_F5, 0)
         menu.append(mi_refresh)
-        return top
-
-    def _record_menu(self):
-        top = Gtk.MenuItem(label="Record")
-        menu = Gtk.Menu()
-        top.set_submenu(menu)
-
-        self.mi_reveal_bib = _menu_item("Reveal .bib in File Manager",
-                                        "folder-open")
-        self.mi_reveal_bib.connect("activate",
-                                   lambda *_: self._reveal("bib"))
-        menu.append(self.mi_reveal_bib)
-
-        self.mi_reveal_md = _menu_item("Reveal .md in File Manager",
-                                       "folder-open")
-        self.mi_reveal_md.connect("activate",
-                                  lambda *_: self._reveal("md"))
-        menu.append(self.mi_reveal_md)
 
         menu.append(Gtk.SeparatorMenuItem())
 
-        self.mi_edit_bib = _menu_item("Open .bib in Text Editor",
-                                      "accessories-text-editor")
-        self.mi_edit_bib.connect("activate",
-                                 lambda *_: self._open_in_editor("bib"))
-        menu.append(self.mi_edit_bib)
+        self.mi_view_open_pdf = _menu_item("Open PDF", "application-pdf")
+        self.mi_view_open_pdf.connect("activate", lambda *_: self._open_pdf())
+        menu.append(self.mi_view_open_pdf)
 
-        self.mi_edit_md = _menu_item("Open .md in Text Editor",
-                                     "accessories-text-editor")
-        self.mi_edit_md.connect("activate",
-                                lambda *_: self._open_in_editor("md"))
-        menu.append(self.mi_edit_md)
-
-        self.mi_open_pdf = _menu_item("Open PDF", "application-pdf")
-        self.mi_open_pdf.connect("activate", lambda *_: self._open_pdf())
-        menu.append(self.mi_open_pdf)
-
-        menu.append(Gtk.SeparatorMenuItem())
-
-        self.mi_rename = _menu_item("Rename Bibliotheca ID\u2026",
-                                    "document-edit")
-        self.mi_rename.connect("activate", self._on_rename_record)
-        self._accel(self.mi_rename, Gdk.KEY_F2, 0)
-        menu.append(self.mi_rename)
+        self.mi_view_open_epub = _menu_item("Open EPUB", "x-office-document")
+        self.mi_view_open_epub.connect("activate",
+                                       lambda *_: self._open_epub())
+        menu.append(self.mi_view_open_epub)
         return top
 
     def _tools_menu(self):
@@ -325,6 +300,24 @@ class MainWindow(Gtk.ApplicationWindow):
         self.tb_sort.set_tooltip_text("Sort the current list (Ctrl+Shift+S)")
         self.tb_sort.connect("clicked", self._on_sort)
         tb.insert(self.tb_sort, -1)
+
+        tb.insert(Gtk.SeparatorToolItem(), -1)
+
+        self.tb_open_pdf = Gtk.ToolButton.new(
+            Gtk.Image.new_from_icon_name("application-pdf",
+                                         Gtk.IconSize.LARGE_TOOLBAR),
+            "Open PDF")
+        self.tb_open_pdf.set_tooltip_text("Open the selected record's PDF")
+        self.tb_open_pdf.connect("clicked", lambda *_: self._open_pdf())
+        tb.insert(self.tb_open_pdf, -1)
+
+        self.tb_open_epub = Gtk.ToolButton.new(
+            Gtk.Image.new_from_icon_name("x-office-document",
+                                         Gtk.IconSize.LARGE_TOOLBAR),
+            "Open EPUB")
+        self.tb_open_epub.set_tooltip_text("Open the selected record's EPUB")
+        self.tb_open_epub.connect("clicked", lambda *_: self._open_epub())
+        tb.insert(self.tb_open_epub, -1)
 
         self._apply_toolbar_style()
         return tb
@@ -552,6 +545,51 @@ class MainWindow(Gtk.ApplicationWindow):
         except Exception as exc:  # noqa: BLE001
             self._warn(f"Could not open PDF:\n{exc}")
 
+    def _open_epub(self):
+        rec = self._current_record()
+        if not rec:
+            return
+        path = self.workspace.resolve_fulltext_path(
+            rec.bibliotheca_id, "epub",
+            self.config.get("fulltext_library_path", "") or None)
+        if not path:
+            self._warn("No EPUB is set for this record.")
+            return
+        if not Path(path).exists():
+            self._warn(f"The EPUB could not be found:\n{path}")
+            return
+        try:
+            open_with_default_app(path)
+        except Exception as exc:  # noqa: BLE001
+            self._warn(f"Could not open EPUB:\n{exc}")
+
+    def _on_record_action(self, _tab, action):
+        """Route a record context-menu action (from the Catalogue's popup)
+        to the appropriate handler, acting on the current record."""
+        if action == "reveal_bib":
+            self._reveal("bib")
+        elif action == "reveal_md":
+            self._reveal("md")
+        elif action == "edit_bib":
+            self._open_in_editor("bib")
+        elif action == "edit_md":
+            self._open_in_editor("md")
+        elif action == "open_pdf":
+            self._open_pdf()
+        elif action == "open_epub":
+            self._open_epub()
+        elif action == "rename":
+            self._on_rename_record(None)
+
+    def _accel_rename(self, _group, _accel, _keyval, _modifier):
+        # only when the Catalogue tab is active and a record is selected
+        if self.notebook.get_current_page() != 0:
+            return False
+        if not self._current_record():
+            return False
+        self._on_rename_record(None)
+        return True
+
     def _on_rename_record(self, _item):
         rec = self._current_record()
         if not rec:
@@ -587,6 +625,10 @@ class MainWindow(Gtk.ApplicationWindow):
             dlg.destroy()
 
     def _on_catalogue_selection(self, _tab, has_selection):
+        self._update_actions_sensitivity()
+
+    def _on_tab_switched(self, _nb, _page, _num):
+        # Open PDF/EPUB depend on being on the Catalogue tab, so refresh.
         self._update_actions_sensitivity()
 
     # ==================================================================
@@ -678,6 +720,7 @@ class MainWindow(Gtk.ApplicationWindow):
             ("Alt+2", "Authors tab"),
             ("Alt+3", "DOI Lookup tab"),
             ("F5", "Refresh current view"),
+            ("Ctrl+Shift+S", "Sort current list"),
             ("F2", "Rename Bibliotheca ID"),
             ("Ctrl+?", "This shortcuts list"),
         ]
@@ -749,11 +792,16 @@ class MainWindow(Gtk.ApplicationWindow):
                   self.mi_validate, self.mi_sort, self.tb_rescan,
                   self.tb_import, self.tb_sort):
             w.set_sensitive(has_ws)
-        for w in (self.mi_reveal_bib, self.mi_reveal_md, self.mi_edit_bib,
-                  self.mi_edit_md, self.mi_rename):
-            w.set_sensitive(has_rec)
-        # Open PDF only when the selected record actually has a PDF
-        self.mi_open_pdf.set_sensitive(bool(has_rec and rec.has_pdf))
+
+        # Open PDF/EPUB: only on the Catalogue tab, with a record selected that
+        # actually has that full-text linked.
+        on_catalogue = (self.notebook.get_current_page() == 0)
+        can_pdf = bool(on_catalogue and has_rec and rec.has_pdf)
+        can_epub = bool(on_catalogue and has_rec and rec.has_epub)
+        self.mi_view_open_pdf.set_sensitive(can_pdf)
+        self.tb_open_pdf.set_sensitive(can_pdf)
+        self.mi_view_open_epub.set_sensitive(can_epub)
+        self.tb_open_epub.set_sensitive(can_epub)
 
     def _update_title(self):
         if self.workspace:

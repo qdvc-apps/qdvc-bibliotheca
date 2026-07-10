@@ -7,7 +7,8 @@ import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, Gdk, Pango, GObject  # noqa: E402
 
-from .platform_utils import open_with_default_app  # noqa: E402
+from .platform_utils import (open_with_default_app,  # noqa: E402
+                             open_with_text_editor)
 
 
 # Sidebar node kinds
@@ -57,6 +58,9 @@ class CatalogueTab(Gtk.Box):
         "record-activated": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
         # emitted (bool has_selection) when the master selection changes
         "selection-changed": (GObject.SignalFlags.RUN_FIRST, None, (bool,)),
+        # emitted (action_name) for record context-menu actions the main
+        # window handles (reveal/edit/open/rename) against the current record
+        "record-action": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
     }
 
     def __init__(self):
@@ -143,7 +147,7 @@ class CatalogueTab(Gtk.Box):
             "Webpage": "text-html",
             "Other": "emblem-documents",
         }
-        for label in ["Journal article", "Conference paper", "Book chapter",
+        for label in ["Journal article", "Book chapter",
                       "Book", "Webpage", "Other"]:
             self.side_store.append(
                 by_type, [type_icons.get(label, "text-x-generic"),
@@ -266,15 +270,20 @@ class CatalogueTab(Gtk.Box):
         menu = None
         if kind == NODE_WORKS_ROOT:
             menu = Gtk.Menu()
-            mi = Gtk.MenuItem(label="Add work\u2026")
+            mi = _img_menu_item("Add work\u2026", "list-add")
             mi.connect("activate", lambda *_: self._add_work())
             menu.append(mi)
         elif kind == NODE_WORK:
             menu = Gtk.Menu()
-            mi_edit = Gtk.MenuItem(label="Edit work\u2026")
+            mi_edit = _img_menu_item("Edit work\u2026", "document-edit")
             mi_edit.connect("activate", lambda *_: self._edit_work(key))
             menu.append(mi_edit)
-            mi_add = Gtk.MenuItem(label="Add work\u2026")
+            mi_open = _img_menu_item("Open YAML in Text Editor",
+                                     "accessories-text-editor")
+            mi_open.connect("activate", lambda *_: self._open_work_yaml(key))
+            menu.append(mi_open)
+            menu.append(Gtk.SeparatorMenuItem())
+            mi_add = _img_menu_item("Add work\u2026", "list-add")
             mi_add.connect("activate", lambda *_: self._add_work())
             menu.append(mi_add)
         if menu:
@@ -282,6 +291,15 @@ class CatalogueTab(Gtk.Box):
             menu.popup_at_pointer(event)
             return True
         return False
+
+    def _open_work_yaml(self, key):
+        work = self.workspace.my_works.get(key) if self.workspace else None
+        if not work or not work.path:
+            return
+        from pathlib import Path as _P
+        if not _P(work.path).exists():
+            return
+        open_with_text_editor(work.path)
 
     def _selected_work_key(self):
         model, it = self.side_view.get_selection().get_selected()
@@ -618,30 +636,88 @@ class CatalogueTab(Gtk.Box):
             return False
 
         fm, _ = rec.read_notes()
+        has_pdf = bool(fm.get("pdf"))
+        has_epub = bool(fm.get("epub"))
         menu = Gtk.Menu()
 
-        mi_pdf = Gtk.MenuItem(label="Set PDF\u2026")
-        mi_pdf.connect("activate", lambda *_: self._set_fulltext(rec, "pdf"))
-        menu.append(mi_pdf)
+        # --- Record actions (mirrors the former Record menu) -------------
+        def emit(action):
+            return lambda *_: self.emit("record-action", action)
 
-        mi_epub = Gtk.MenuItem(label="Set EPUB\u2026")
-        mi_epub.connect("activate", lambda *_: self._set_fulltext(rec, "epub"))
-        menu.append(mi_epub)
+        mi = _img_menu_item("Reveal .bib in File Manager", "folder-open")
+        mi.connect("activate", emit("reveal_bib"))
+        menu.append(mi)
+        mi = _img_menu_item("Reveal .md in File Manager", "folder-open")
+        mi.connect("activate", emit("reveal_md"))
+        menu.append(mi)
 
-        if fm.get("pdf") or fm.get("epub"):
-            menu.append(Gtk.SeparatorMenuItem())
-            if fm.get("pdf"):
-                mi_open = Gtk.MenuItem(label="Open PDF")
-                mi_open.connect("activate", lambda *_: self._open_pdf(rec))
-                menu.append(mi_open)
-            mi_clear = Gtk.MenuItem(label="Remove full-text link(s)")
-            mi_clear.connect("activate",
-                             lambda *_: self._clear_fulltext(rec))
-            menu.append(mi_clear)
+        menu.append(Gtk.SeparatorMenuItem())
+
+        mi = _img_menu_item("Open .bib in Text Editor",
+                            "accessories-text-editor")
+        mi.connect("activate", emit("edit_bib"))
+        menu.append(mi)
+        mi = _img_menu_item("Open .md in Text Editor",
+                            "accessories-text-editor")
+        mi.connect("activate", emit("edit_md"))
+        menu.append(mi)
+
+        mi_open_pdf = _img_menu_item("Open PDF", "application-pdf")
+        mi_open_pdf.connect("activate", emit("open_pdf"))
+        mi_open_pdf.set_sensitive(has_pdf)
+        menu.append(mi_open_pdf)
+
+        mi_open_epub = _img_menu_item("Open EPUB", "x-office-document")
+        mi_open_epub.connect("activate", emit("open_epub"))
+        mi_open_epub.set_sensitive(has_epub)
+        menu.append(mi_open_epub)
+
+        menu.append(Gtk.SeparatorMenuItem())
+
+        mi = _img_menu_item("Copy Bibliotheca ID", "edit-copy")
+        mi.connect("activate", lambda *_: self._copy_bibliotheca_id(rec))
+        menu.append(mi)
+
+        mi = _img_menu_item("Rename Bibliotheca ID\u2026", "document-edit")
+        mi.connect("activate", emit("rename"))
+        menu.append(mi)
+
+        menu.append(Gtk.SeparatorMenuItem())
+
+        # --- Full-text management ---------------------------------------
+        mi = _img_menu_item("Set PDF\u2026", "application-pdf")
+        mi.connect("activate", lambda *_: self._set_fulltext(rec, "pdf"))
+        menu.append(mi)
+        mi = _img_menu_item("Set EPUB\u2026", "x-office-document")
+        mi.connect("activate", lambda *_: self._set_fulltext(rec, "epub"))
+        menu.append(mi)
+
+        if has_pdf or has_epub:
+            mi = _img_menu_item("Remove full-text link(s)", "edit-delete")
+            mi.connect("activate", lambda *_: self._clear_fulltext(rec))
+            menu.append(mi)
 
         menu.show_all()
         menu.popup_at_pointer(event)
         return True
+
+    def _copy_bibliotheca_id(self, rec):
+        clip = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+        clip.set_text(rec.bibliotheca_id, -1)
+        clip.store()
+
+    def _open_epub(self, rec=None):
+        rec = rec or self._current_record
+        if not rec or not self.workspace:
+            return
+        path = self.workspace.resolve_fulltext_path(
+            rec.bibliotheca_id, "epub", self._fulltext_root)
+        if not path:
+            return
+        if not Path(path).exists():
+            self._warn_missing_file(path)
+            return
+        open_with_default_app(path)
 
     def _set_fulltext(self, rec, kind):
         if not rec or not self.workspace:
@@ -858,6 +934,18 @@ class CatalogueTab(Gtk.Box):
 # ----------------------------------------------------------------------
 # clipboard helpers
 # ----------------------------------------------------------------------
+
+def _img_menu_item(label, icon_name):
+    """A menu item with a leading icon, built without deprecated
+    Gtk.ImageMenuItem (removed in GTK4)."""
+    item = Gtk.MenuItem()
+    box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+    img = Gtk.Image.new_from_icon_name(icon_name, Gtk.IconSize.MENU)
+    box.pack_start(img, False, False, 0)
+    box.pack_start(Gtk.Label(label=label, xalign=0), True, True, 0)
+    item.add(box)
+    return item
+
 
 def _markup_to_html(markup: str) -> str:
     # Pango uses <i>, which is already valid HTML. Wrap for completeness.

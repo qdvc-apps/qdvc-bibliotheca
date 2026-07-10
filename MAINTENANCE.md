@@ -126,16 +126,27 @@ clobber each other. Preserve this ordering if you add frontmatter writers.
 
 ```
 name: My Dissertation
-published_as: SmithJones2025_MISQ   # optional
 cites:
-  - SmithJones2025_MISQ
   - Jones2009_JAIS
+  - SmithJones2025_MISQ
+published_as: SmithJones2025_MISQ   # optional
 ```
 
-Loader (`_load_my_works`) is tolerant: it accepts `cites` or `citations`,
-`name` or `title`, and `published_as` or `published_version`. The canonical
-writer (`MyWork.save` / `to_yaml_dict`) emits `name`, `cites`, and
-`published_as` (only if set).
+Loader (`_load_my_works`) is tolerant on read: it accepts `cites` or
+`citations`, `name` or `title`, and `published_as` or `published_version`.
+
+**Canonical form (enforced on write and on load):** `name` first, then `cites`,
+then optional `published_as`. `cites` is de-duplicated and sorted
+case-insensitively by Bibliotheca ID. `MyWork.to_yaml_dict` builds the dict in
+that key order and `MyWork.save` dumps with `sort_keys=False`
+(`MyWork.sorted_cites` does the de-dup/sort, and `save` also rewrites the
+in-memory `cites` to match). On load, `_load_my_works` compares each file's
+raw text against its canonical serialisation and rewrites the file in place if
+they differ (`_canonicalise_work_file`), so any hand-edited or legacy file is
+normalised the first time the app touches it. `records_for_work` returns
+records in `sorted_cites()` order. The **Edit Work** dialog keeps its cited
+list alphabetical and inserts newly-added references at their sorted slot
+(`_insert_cited_sorted`).
 
 ### 4.4 authors YAML
 
@@ -307,10 +318,17 @@ depend on), and a status bar.
 plain `MenuItem` — deliberately **not** `Gtk.ImageMenuItem`, which is removed in
 GTK4 and warns in GTK3.
 
-Actions/sensitivity: `_update_actions_sensitivity` centralises enable/disable
-based on whether a workspace is open and whether a record is selected (and,
-for "Open PDF", whether that record has a PDF). It's called after open/close/
-reindex and on the Catalogue's `selection-changed` signal.
+Actions/sensitivity: `_update_actions_sensitivity` centralises enable/disable.
+Workspace-scoped items (Close, Import, Refresh, Validate, Sort, and their
+toolbar peers) track whether a workspace is open. **Open PDF** and **Open
+EPUB** (in the View menu and toolbar) are enabled only when the Catalogue tab
+is active *and* a record is selected *and* that record has the corresponding
+full-text linked — so it's recomputed on the notebook `switch-page` signal
+(`_on_tab_switched`) as well as on open/close/reindex and the Catalogue's
+`selection-changed` signal. There is no longer a menubar **Record** menu; its
+actions moved to the Catalogue's row right-click menu (see §8.2), and F2
+(rename) is bound at the window level via `accel_group.connect` →
+`_accel_rename`, which fires only on the Catalogue tab with a record selected.
 
 ### 8.2 Catalogue tab (`catalogue_tab.py`) — the big one
 
@@ -319,16 +337,20 @@ Three panes in nested `Gtk.Paned`:
 - **Pane 1 (sidebar)** — a `Gtk.TreeStore` with columns
   `(icon_name, label, kind, key, pango_style_int)`. Node "kind" constants:
   `NODE_ALL, NODE_TYPE, NODE_WORK, NODE_WORKS_ROOT, NODE_AUTHOR, NODE_FULLTEXT,
-  NODE_DOI, NODE_TEMP`. Sections: All articles / By type / By full-text
-  (PDF available / EPUB available / Not available, keys `pdf`/`epub`/`none`) /
-  By DOI status (DOI is set / not set, keys `set`/`unset`) / My works / Starred
-  authors. Selecting a node calls `_apply_filter(kind, key)`, which repopulates
-  Pane 2 and records `_active_filter` (so `refresh_current_view` can re-apply
-  it).
+  NODE_DOI, NODE_TEMP`. Sections: All articles / By type (Journal article /
+  Book chapter / Book / Webpage / Other — note **Conference paper is not
+  listed** as a filter, though records may still carry that type label) / By
+  full-text (PDF available / EPUB available / Not available, keys
+  `pdf`/`epub`/`none`) / By DOI status (DOI is set / not set, keys
+  `set`/`unset`) / My works / Starred authors. Selecting a node calls
+  `_apply_filter(kind, key)`, which repopulates Pane 2 and records
+  `_active_filter` (so `refresh_current_view` can re-apply it).
 
   - **Right-click** (`_on_sidebar_button_press`): on the My-works root →
-    "Add work…"; on a work → "Edit work… / Add work…". (This replaced an
-    earlier +/pencil button bar.)
+    "Add work…"; on a work → "Edit work… / Open YAML in Text Editor / Add
+    work…" (`_open_work_yaml` launches the work's `.yml` via
+    `open_with_text_editor`). Items use `_img_menu_item` for icons. (This
+    replaced an earlier +/pencil button bar.)
   - **Transient query node** (`NODE_TEMP`): when the Authors tab asks to show a
     *non-starred* author's works, `show_author_works` rebuilds the sidebar with
     an italic "Query: …" node pinned at the bottom and selects it, so Pane 1
@@ -345,9 +367,19 @@ Three panes in nested `Gtk.Paned`:
   fixed-width so 4-digit years aren't ellipsised. A `filter_new()` model backs
   the search box.
 
-  - **Right-click** (`_on_master_button_press`): Set PDF… / Set EPUB… / Open
-    PDF / Remove full-text link(s) for the row under the pointer. This is the
-    only place to *attach* full-text.
+  - **Right-click** (`_on_master_button_press`): the primary record menu. It
+    carries, top to bottom (all via `_img_menu_item`, so all have icons):
+    Reveal .bib / Reveal .md in File Manager; Open .bib / Open .md in Text
+    Editor; Open PDF; Open EPUB (the last two disabled when that full-text is
+    absent); Copy Bibliotheca ID; Rename Bibliotheca ID…; then the full-text
+    management block Set PDF… / Set EPUB… / Remove full-text link(s). The
+    "reveal/edit/open/rename" items don't act locally — they call
+    `self.emit("record-action", <name>)`, and `MainWindow._on_record_action`
+    routes each to the existing handler acting on the current record. This is
+    the successor to the old menubar **Record** menu, which has been removed.
+    Copy Bibliotheca ID (`_copy_bibliotheca_id`) and the Set/Remove full-text
+    items are handled inside the tab. This right-click menu is the only place
+    to *attach* full-text.
 
 - **Pane 3 (detail)** — read-only APA reference label (Pango markup), Copy
   (rich) / Copy (plain) buttons, an **Open PDF** button (shown enabled only
@@ -485,16 +517,18 @@ placeholder, not a crash).
 
 ## 11. Deployment: desktop launcher & icon
 
-The app ships a fallback icon at `qdvc/data/qdvc-bibliotheca.svg`.
-`app.install_default_icon()` (called from `do_startup`) prefers a themed icon
-named `qdvc-bibliotheca` if the system icon theme has one, otherwise loads the
-bundled SVG directly from disk at several sizes via
-`Gtk.Window.set_default_icon_list`. `MainWindow` also sets the icon on its own
-window. `GLib.set_prgname("qdvc-bibliotheca")` (run at import in `app.py`) fixes
-the X11 `WM_CLASS`.
+The app uses a **standard freedesktop themed icon** — `accessories-dictionary`
+— present on a typical GNOME/MATE install, so no icon file is bundled or needs
+installing. `app.py` defines `ICON_NAME = "accessories-dictionary"`;
+`do_startup` calls `Gtk.Window.set_default_icon_name(ICON_NAME)` and
+`MainWindow.__init__` calls `self.set_icon_name("accessories-dictionary")`, so
+the icon shows even before any `.desktop` matching.
+`GLib.set_prgname("qdvc-bibliotheca")` (run at import in `app.py`) fixes the
+X11 `WM_CLASS` so the MATE panel can associate the running window with the
+launcher.
 
-For the **MATE panel** to show the app icon rather than a generic one, the
-running window's `WM_CLASS` must match the launcher's `StartupWMClass`. Install
+For the **MATE panel** to show the icon rather than a generic one, the running
+window's `WM_CLASS` must match the launcher's `StartupWMClass`. Install
 `~/.local/share/applications/qdvc-bibliotheca.desktop`:
 
 ```
@@ -504,7 +538,7 @@ Name=QDVC Bibliotheca
 Comment=Manage your personal collection of articles, papers and books
 Exec=python3 /full/path/to/qdvc-bibliotheca.py %U
 Path=/full/path/to
-Icon=qdvc-bibliotheca
+Icon=accessories-dictionary
 Terminal=false
 Categories=Office;Education;Literature;
 StartupNotify=true
@@ -514,17 +548,15 @@ Keywords=bibliography;references;bibtex;citations;research;
 
 - `StartupWMClass=qdvc-bibliotheca` is the load-bearing line for the panel
   icon; it must equal the value passed to `set_prgname`.
-- `Icon=qdvc-bibliotheca` is used by the launcher/menu. For it to resolve
-  outside the app, install the icon into the theme:
-  ```
-  mkdir -p ~/.local/share/icons/hicolor/scalable/apps
-  cp qdvc/data/qdvc-bibliotheca.svg \
-     ~/.local/share/icons/hicolor/scalable/apps/qdvc-bibliotheca.svg
-  gtk-update-icon-cache ~/.local/share/icons/hicolor 2>/dev/null || true
-  ```
-  (The *window/taskbar* icon works from the bundled SVG even without this; the
-  theme install is what makes the *menu/launcher* entry show it too.)
-- Verify with `xprop WM_CLASS` (click the window) — both strings should be
+- `Icon=accessories-dictionary` is a standard themed icon, so the launcher/menu
+  entry resolves it without any extra install step. To use custom artwork
+  instead, point `Icon=` at an absolute path to a `.png`/`.svg` and change
+  `ICON_NAME` in `app.py` (and the `set_icon_name` call in `main_window.py`) to
+  match.
+- `Exec` must be an absolute path; `Path` must be the directory containing both
+  `qdvc-bibliotheca.py` and the `qdvc/` package. `%U` lets you drop a workspace
+  folder on the launcher.
+- Verify with `xprop WM_CLASS` (click the window) — a string should be
   `qdvc-bibliotheca`. If the panel still shows the old icon, log out/in; MATE
   caches launcher↔WM-class associations per session.
 - Refresh + validate:
@@ -532,11 +564,6 @@ Keywords=bibliography;references;bibtex;citations;research;
   update-desktop-database ~/.local/share/applications
   desktop-file-validate ~/.local/share/applications/qdvc-bibliotheca.desktop
   ```
-
-Packaging note: `qdvc/data/*.svg` must be included as package data (it is
-loaded by filesystem path relative to `app.py`, so a zipimport/egg that doesn't
-extract data files would break the bundled-icon fallback — ship it unzipped or
-adjust the loader to use `importlib.resources`).
 
 ---
 
@@ -557,11 +584,12 @@ Sort dialog is accepted or cleared. Unknown field ids load harmlessly:
 - **GTK 3 only.** A GTK 4 port would need: `ImageMenuItem` replacement (already
   done), `Gtk.Toolbar` (removed in 4), `override_font` (removed), and the
   clipboard API (rewritten around `Gdk.Clipboard`).
-- **`WM_CLASS` / panel icon**: the app now ships a fallback icon and sets it
-  explicitly (see §11), so the window/taskbar icon should render even without a
-  themed icon installed. The MATE *launcher* association still relies on
-  `set_prgname` matching the `.desktop` `StartupWMClass`. Under Wayland, window
-  placement and some class matching are compositor-controlled.
+- **`WM_CLASS` / panel icon**: the app sets a standard themed icon
+  (`accessories-dictionary`) as both the default and per-window icon, so the
+  window/taskbar icon renders without any icon file being installed. The MATE
+  *launcher* association still relies on `set_prgname` matching the `.desktop`
+  `StartupWMClass` (see §11). Under Wayland, window placement and some class
+  matching are compositor-controlled.
 - **Notes vs frontmatter writes** must be ordered (flush notes before
   frontmatter writes) — see §4.2.
 - **Column-0 offset** in the master table is a recurring source of off-by-one

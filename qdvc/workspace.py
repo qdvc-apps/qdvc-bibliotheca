@@ -216,16 +216,33 @@ class MyWork:
     cites: list[str] = field(default_factory=list)
     published_as: str | None = None
 
+    def sorted_cites(self) -> list[str]:
+        """Cited Bibliotheca IDs, de-duplicated and alphabetically ordered
+        (case-insensitive)."""
+        seen = set()
+        unique = []
+        for c in self.cites:
+            if c not in seen:
+                seen.add(c)
+                unique.append(c)
+        return sorted(unique, key=str.lower)
+
     def to_yaml_dict(self) -> dict:
-        data: dict = {"name": self.name, "cites": list(self.cites)}
+        # Order matters: `name` first, then `cites`, then optional extras.
+        # Python dicts preserve insertion order and we dump with
+        # sort_keys=False so this ordering is what lands on disk.
+        data: dict = {"name": self.name, "cites": self.sorted_cites()}
         if self.published_as:
             data["published_as"] = self.published_as
         return data
 
     def save(self) -> None:
+        # keep the in-memory list canonicalised too, so callers that read
+        # `cites` after a save see the same order that was written
+        self.cites = self.sorted_cites()
         p = Path(self.path)
         p.parent.mkdir(parents=True, exist_ok=True)
-        text = yaml.safe_dump(self.to_yaml_dict(), sort_keys=True,
+        text = yaml.safe_dump(self.to_yaml_dict(), sort_keys=False,
                               allow_unicode=True)
         tmp = p.with_suffix(p.suffix + ".tmp")
         tmp.write_text(text, encoding="utf-8")
@@ -426,8 +443,10 @@ class Workspace:
         if not d.is_dir():
             return
         for f in sorted(d.glob("*.yml")) + sorted(d.glob("*.yaml")):
+            raw_text = ""
             try:
-                data = yaml.safe_load(f.read_text(encoding="utf-8")) or {}
+                raw_text = f.read_text(encoding="utf-8")
+                data = yaml.safe_load(raw_text) or {}
             except (OSError, yaml.YAMLError):
                 data = {}
             if not isinstance(data, dict):
@@ -436,13 +455,30 @@ class Workspace:
             if not isinstance(cites, list):
                 cites = []
             name = data.get("name") or data.get("title") or f.stem
-            self.my_works[f.stem] = MyWork(
+            work = MyWork(
                 name=str(name),
                 path=str(f),
                 cites=[str(c) for c in cites],
                 published_as=data.get("published_as")
                 or data.get("published_version"),
             )
+            self.my_works[f.stem] = work
+            # Ensure the file on disk is in canonical form (name before cites,
+            # cites alphabetised, canonical key names). Rewrite only if needed.
+            self._canonicalise_work_file(work, raw_text)
+
+    @staticmethod
+    def _canonicalise_work_file(work: "MyWork", raw_text: str) -> None:
+        try:
+            canonical = yaml.safe_dump(work.to_yaml_dict(), sort_keys=False,
+                                       allow_unicode=True)
+        except Exception:  # noqa: BLE001
+            return
+        if raw_text != canonical:
+            try:
+                work.save()
+            except OSError:
+                pass
 
     def _build_doi_index(self) -> None:
         self._doi_index.clear()
@@ -568,7 +604,8 @@ class Workspace:
         work = self.my_works.get(work_key)
         if not work:
             return []
-        return [self.records[c] for c in work.cites if c in self.records]
+        return [self.records[c] for c in work.sorted_cites()
+                if c in self.records]
 
     def lookup_doi(self, doi: str) -> str | None:
         return self._doi_index.get(_normalise_doi(doi).lower())
