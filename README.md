@@ -13,9 +13,11 @@ Git or Syncthing.
 ## What it does
 
 - **Catalogue** — browse and filter your library in a three-pane view: pick a
-  filter on the left (all works, by type, by project, or by a starred author),
-  scan the table in the middle, and read the APA-7 reference and your notes on
-  the right. Copy references as rich text or plain text in one click.
+  filter on the left (all works, by type, by full-text availability, by DOI
+  status, by project, or by a starred author), scan the sortable table in the
+  middle, and read the APA-7 reference and your notes on the right. Sort by
+  several keys at once (e.g. Year descending, then Author ascending). Copy
+  references as rich text or plain text in one click.
 - **Authors** — a list of every author, derived automatically from your
   BibTeX. Star the ones you follow and they become quick filters in the
   Catalogue.

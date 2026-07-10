@@ -62,6 +62,7 @@ qdvc/
     doi_tab.py             DOI lookup tab.
     preferences.py         Preferences dialog.
     myworks_editor.py      Dialog to edit a "my work" (citations + published_as).
+    sort_dialog.py         Dialog to build a multi-key sort specification.
 ```
 
 ### 3.2 Workspace on disk
@@ -208,9 +209,10 @@ load(force_rescan=False):
 
 ### 5.5 Query API (used by the UI)
 
-`all_records`, `records_by_type(label)`, `records_for_work(key)`,
-`records_for_author(author_id)`, `all_authors`, `starred_authors`,
-`lookup_doi(doi)`, `get(bibliotheca_id)`.
+`all_records`, `records_by_type(label)`, `records_by_fulltext(which)` (which ∈
+{"pdf","epub","none"}), `records_by_doi_status(has_doi)`,
+`records_for_work(key)`, `records_for_author(author_id)`, `all_authors`,
+`starred_authors`, `lookup_doi(doi)`, `get(bibliotheca_id)`.
 
 ### 5.6 Mutation API
 
@@ -316,10 +318,13 @@ Three panes in nested `Gtk.Paned`:
 
 - **Pane 1 (sidebar)** — a `Gtk.TreeStore` with columns
   `(icon_name, label, kind, key, pango_style_int)`. Node "kind" constants:
-  `NODE_ALL, NODE_TYPE, NODE_WORK, NODE_WORKS_ROOT, NODE_AUTHOR, NODE_TEMP`.
-  Sections: All articles / By type / My works / Starred authors. Selecting a
-  node calls `_apply_filter(kind, key)`, which repopulates Pane 2 and records
-  `_active_filter` (so `refresh_current_view` can re-apply it).
+  `NODE_ALL, NODE_TYPE, NODE_WORK, NODE_WORKS_ROOT, NODE_AUTHOR, NODE_FULLTEXT,
+  NODE_DOI, NODE_TEMP`. Sections: All articles / By type / By full-text
+  (PDF available / EPUB available / Not available, keys `pdf`/`epub`/`none`) /
+  By DOI status (DOI is set / not set, keys `set`/`unset`) / My works / Starred
+  authors. Selecting a node calls `_apply_filter(kind, key)`, which repopulates
+  Pane 2 and records `_active_filter` (so `refresh_current_view` can re-apply
+  it).
 
   - **Right-click** (`_on_sidebar_button_press`): on the My-works root →
     "Add work…"; on a work → "Edit work… / Add work…". (This replaced an
@@ -348,6 +353,23 @@ Three panes in nested `Gtk.Paned`:
   (rich) / Copy (plain) buttons, an **Open PDF** button (shown enabled only
   when a PDF is set), the editable notes `TextView`, and a status line.
 
+**Multi-key sorting**: sorting is done in the model layer, not via GTK's
+single-column `set_sort_column_id`. The tab holds `_sort_spec`, an ordered list
+of `(sort_key, ascending_bool)`, and `_current_records`, the unsorted source
+list last handed to `_populate_master`. `_sorted_records` applies the spec as a
+*stable sort from least- to most-significant key* (iterating `reversed(spec)`),
+which yields correct multi-column precedence. The sort persists across sidebar
+filter changes because every populate path runs through `_populate_master`
+(which re-applies it) and `set_sort_spec` re-renders `_current_records` in
+place. The available keys and their comparison functions live in the
+module-level `SORT_KEYS` dict; `SORT_LABELS` gives their display order and human
+names. Year sorts numerically via `_year_key` (so 2009 < 2025). `SortDialog`
+(in `sort_dialog.py`) is the UI: an ordered, reorderable list the user builds
+with an "add key" combo, up/down/toggle-direction/remove buttons; it returns
+the spec via `get_spec()`. The View → Sort menu item and the Sort toolbar
+button (both workspace-sensitive) invoke it from `MainWindow._on_sort`, which
+also handles the dialog's "Clear" response (empty spec = default id order).
+
 **Notes autosave**: `_on_notes_changed` marks `_notes_dirty`; `_flush_notes`
 writes on record switch, on `set_fulltext`/`clear`, on workspace change, and on
 window close. Honours the `autosave` preference. Suppressed during programmatic
@@ -363,7 +385,8 @@ this back to `set_with_data`.
 Public methods the main window calls: `set_workspace`, `set_fulltext_root`,
 `set_notes_font`, `set_autosave`, `set_sidebar_visible`, `set_detail_visible`,
 `refresh_current_view`, `refresh_starred_authors`, `show_author_works`,
-`reveal_record`, `current_record`, `flush_notes`.
+`reveal_record`, `current_record`, `flush_notes`, `set_sort_spec`,
+`get_sort_spec`.
 
 ### 8.3 Authors tab (`authors_tab.py`)
 
@@ -444,6 +467,9 @@ placeholder, not a crash).
   query to `Workspace`.
 - **Add a validation check** → add the key + logic in `Workspace.validate`, and
   a `section(...)` line in `MainWindow._format_report`.
+- **Add a sortable field** → add an entry to `SORT_KEYS` (id → key function)
+  and `SORT_LABELS` (id → label, in display order) in `catalogue_tab.py`. The
+  sort dialog and the sort engine pick it up automatically.
 - **Add a preference** → widget + `apply()` in `preferences.py`; read via
   `config.get(key, default)`; if it affects widgets live, push it in
   `_apply_prefs_to_widgets`.
@@ -475,4 +501,3 @@ placeholder, not a crash).
 - The **index is disposable**: deleting `.qdvc-index.json` or using Rescan
   forces a clean rebuild. When debugging "stale data" reports, suspect the
   cache first.
-

@@ -198,6 +198,12 @@ class MainWindow(Gtk.ApplicationWindow):
 
         menu.append(Gtk.SeparatorMenuItem())
 
+        self.mi_sort = _menu_item("Sort\u2026", "view-sort-ascending")
+        self.mi_sort.connect("activate", self._on_sort)
+        self._accel(self.mi_sort, Gdk.KEY_s,
+                    Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK)
+        menu.append(self.mi_sort)
+
         mi_refresh = _menu_item("Refresh Current View", "view-refresh")
         mi_refresh.connect("activate", self._on_refresh_view)
         self._accel(mi_refresh, Gdk.KEY_F5, 0)
@@ -309,6 +315,16 @@ class MainWindow(Gtk.ApplicationWindow):
         self.tb_import.set_tooltip_text("Import a .bib file (Ctrl+I)")
         self.tb_import.connect("clicked", self._on_import)
         tb.insert(self.tb_import, -1)
+
+        tb.insert(Gtk.SeparatorToolItem(), -1)
+
+        self.tb_sort = Gtk.ToolButton.new(
+            Gtk.Image.new_from_icon_name("view-sort-ascending",
+                                         Gtk.IconSize.LARGE_TOOLBAR),
+            "Sort")
+        self.tb_sort.set_tooltip_text("Sort the current list (Ctrl+Shift+S)")
+        self.tb_sort.connect("clicked", self._on_sort)
+        tb.insert(self.tb_sort, -1)
 
         self._apply_toolbar_style()
         return tb
@@ -442,6 +458,30 @@ class MainWindow(Gtk.ApplicationWindow):
     def _on_refresh_view(self, _item):
         self.catalogue.refresh_current_view()
         self._set_status("View refreshed.")
+
+    def _on_sort(self, _item):
+        from .sort_dialog import SortDialog
+        dlg = SortDialog(self, self.catalogue.get_sort_spec())
+        resp = dlg.run()
+        if resp == Gtk.ResponseType.OK:
+            spec = dlg.get_spec()
+            self.catalogue.set_sort_spec(spec)
+            self._set_status(self._describe_sort(spec))
+        elif resp == Gtk.ResponseType.REJECT:  # Clear
+            self.catalogue.set_sort_spec([])
+            self._set_status("Sort cleared (default order).")
+        dlg.destroy()
+
+    @staticmethod
+    def _describe_sort(spec):
+        if not spec:
+            return "Sort cleared (default order)."
+        from .catalogue_tab import SORT_LABELS
+        labels = dict(SORT_LABELS)
+        up, down = "\u2191", "\u2193"
+        parts = [f"{labels.get(fid, fid)} {up if asc else down}"
+                 for fid, asc in spec]
+        return "Sorted by " + ", ".join(parts)
 
     # ==================================================================
     # Record actions
@@ -688,7 +728,8 @@ class MainWindow(Gtk.ApplicationWindow):
         rec = self.catalogue.current_record() if has_ws else None
         has_rec = rec is not None
         for w in (self.mi_close, self.mi_import, self.mi_refresh_ws,
-                  self.mi_validate, self.tb_rescan, self.tb_import):
+                  self.mi_validate, self.mi_sort, self.tb_rescan,
+                  self.tb_import, self.tb_sort):
             w.set_sensitive(has_ws)
         for w in (self.mi_reveal_bib, self.mi_reveal_md, self.mi_edit_bib,
                   self.mi_edit_md, self.mi_rename):

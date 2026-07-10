@@ -16,7 +16,39 @@ NODE_TYPE = "type"
 NODE_WORK = "work"
 NODE_WORKS_ROOT = "works_root"
 NODE_AUTHOR = "author"
+NODE_FULLTEXT = "fulltext"   # key in {"pdf","epub","none"}
+NODE_DOI = "doi"             # key in {"set","unset"}
 NODE_TEMP = "temp"  # transient "query results" node at the bottom
+
+
+def _year_key(r):
+    """Numeric year when possible (so 2009 < 2025), else 0, then raw string."""
+    y = (r.year or "").strip()
+    digits = "".join(ch for ch in y if ch.isdigit())
+    return (int(digits) if digits else 0, y.lower())
+
+
+# Multi-key sort: maps a stable sort-key id to a callable producing a
+# comparison key from a Record. Order of this dict is the order shown to the
+# user in the sort dialog.
+SORT_KEYS = {
+    "bibliotheca_id": lambda r: r.bibliotheca_id.lower(),
+    "author": lambda r: (r.author or "").lower(),
+    "year": _year_key,
+    "outlet": lambda r: (r.outlet or "").lower(),
+    "title": lambda r: (r.title or "").lower(),
+    "type": lambda r: (r.type_label or "").lower(),
+}
+
+# Human labels for the sort-key ids, in display order.
+SORT_LABELS = [
+    ("bibliotheca_id", "Bibliotheca ID"),
+    ("author", "Author"),
+    ("year", "Year"),
+    ("outlet", "Outlet"),
+    ("title", "Title"),
+    ("type", "Type"),
+]
 
 
 class CatalogueTab(Gtk.Box):
@@ -40,6 +72,11 @@ class CatalogueTab(Gtk.Box):
         self._temp_author_id = None
         self._temp_iter = None
         self._suppress_sidebar_change = False
+        # Multi-key sort: ordered list of (sort_key, ascending_bool).
+        # Empty means default order (by bibliotheca_id, ascending).
+        self._sort_spec = []
+        # cache of the records currently shown (post-filter, pre-sort source)
+        self._current_records = []
 
         self.paned_outer = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
         self.paned_inner = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
@@ -106,6 +143,27 @@ class CatalogueTab(Gtk.Box):
             self.side_store.append(
                 by_type, [type_icons.get(label, "text-x-generic"),
                           label, NODE_TYPE, label, n])
+
+        by_ft = self.side_store.append(
+            None, ["emblem-documents", "By full-text", "", "", n])
+        self.side_store.append(
+            by_ft, ["application-pdf", "PDF available", NODE_FULLTEXT,
+                    "pdf", n])
+        self.side_store.append(
+            by_ft, ["x-office-document", "EPUB available", NODE_FULLTEXT,
+                    "epub", n])
+        self.side_store.append(
+            by_ft, ["window-close", "Not available", NODE_FULLTEXT,
+                    "none", n])
+
+        by_doi = self.side_store.append(
+            None, ["insert-link", "By DOI status", "", "", n])
+        self.side_store.append(
+            by_doi, ["insert-link", "DOI is set", NODE_DOI, "set", n])
+        self.side_store.append(
+            by_doi, ["window-close", "DOI is not set", NODE_DOI,
+                     "unset", n])
+
         works = self.side_store.append(
             None, ["folder-documents", "My works", NODE_WORKS_ROOT, "", n])
         if self.workspace:
@@ -172,6 +230,13 @@ class CatalogueTab(Gtk.Box):
         elif kind == NODE_WORK:
             self._active_filter = (NODE_WORK, key)
             self._populate_master(self.workspace.records_for_work(key))
+        elif kind == NODE_FULLTEXT:
+            self._active_filter = (NODE_FULLTEXT, key)
+            self._populate_master(self.workspace.records_by_fulltext(key))
+        elif kind == NODE_DOI:
+            self._active_filter = (NODE_DOI, key)
+            self._populate_master(
+                self.workspace.records_by_doi_status(key == "set"))
         elif kind in (NODE_AUTHOR, NODE_TEMP):
             self._active_filter = (kind, key)
             self._populate_master(self.workspace.records_for_author(key))
@@ -314,12 +379,43 @@ class CatalogueTab(Gtk.Box):
         return box
 
     def _populate_master(self, records):
+        self._current_records = list(records)
         self.master_store.clear()
-        for r in records:
+        for r in self._sorted_records(self._current_records):
             icon = "application-pdf" if getattr(r, "has_pdf", False) else ""
             self.master_store.append(
                 [icon, r.bibliotheca_id, r.author, r.year, r.outlet, r.title,
                  r.type_label])
+
+    def _sorted_records(self, records):
+        """Return records ordered by the current multi-key sort spec.
+
+        Applied as a stable sort from the least-significant key up to the
+        most-significant, which yields correct multi-column precedence.
+        """
+        if not self._sort_spec:
+            return records
+        result = list(records)
+        for key, ascending in reversed(self._sort_spec):
+            keyfunc = SORT_KEYS.get(key)
+            if not keyfunc:
+                continue
+            result.sort(key=keyfunc, reverse=not ascending)
+        return result
+
+    def set_sort_spec(self, spec):
+        """spec: list of (sort_key, ascending_bool). Repopulates the view."""
+        self._sort_spec = list(spec or [])
+        # re-render the currently shown records with the new order
+        self.master_store.clear()
+        for r in self._sorted_records(self._current_records):
+            icon = "application-pdf" if getattr(r, "has_pdf", False) else ""
+            self.master_store.append(
+                [icon, r.bibliotheca_id, r.author, r.year, r.outlet, r.title,
+                 r.type_label])
+
+    def get_sort_spec(self):
+        return list(self._sort_spec)
 
     def _filter_visible(self, model, it, _data):
         needle = self.search.get_text().strip().lower()

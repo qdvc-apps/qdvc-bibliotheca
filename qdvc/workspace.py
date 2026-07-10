@@ -549,6 +549,21 @@ class Workspace:
     def records_by_type(self, label: str) -> list[Record]:
         return [r for r in self.all_records() if r.type_label == label]
 
+    def records_by_fulltext(self, which: str) -> list[Record]:
+        """`which` is 'pdf', 'epub', or 'none' (neither PDF nor EPUB)."""
+        out = []
+        for r in self.all_records():
+            if which == "pdf" and r.has_pdf:
+                out.append(r)
+            elif which == "epub" and r.has_epub:
+                out.append(r)
+            elif which == "none" and not r.has_pdf and not r.has_epub:
+                out.append(r)
+        return out
+
+    def records_by_doi_status(self, has_doi: bool) -> list[Record]:
+        return [r for r in self.all_records() if bool(r.doi) == has_doi]
+
     def records_for_work(self, work_key: str) -> list[Record]:
         work = self.my_works.get(work_key)
         if not work:
