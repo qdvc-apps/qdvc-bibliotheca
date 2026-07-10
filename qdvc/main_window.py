@@ -44,11 +44,18 @@ class MainWindow(Gtk.ApplicationWindow):
         self.workspace = None
 
         # Icon shown in the window frame and (with a matching StartupWMClass in
-        # the .desktop file) in the MATE panel / taskbar. We try a bundled
-        # icon name first, falling back to a stock themed icon.
+        # the .desktop file) in the MATE panel / taskbar. The application-level
+        # default is installed in app.install_default_icon(); we also set it on
+        # this window explicitly so the taskbar has a per-window icon.
         try:
-            Gtk.Window.set_default_icon_name("qdvc-bibliotheca")
             self.set_icon_name("qdvc-bibliotheca")
+            if not self.get_icon() and not self.get_icon_name():
+                from .app import bundled_icon_path
+                from gi.repository import GdkPixbuf
+                p = bundled_icon_path()
+                if p:
+                    self.set_icon(GdkPixbuf.Pixbuf.new_from_file_at_size(
+                        p, 64, 64))
         except Exception:  # noqa: BLE001
             pass
 
@@ -445,6 +452,22 @@ class MainWindow(Gtk.ApplicationWindow):
         self.catalogue.set_fulltext_root(
             self.config.get("fulltext_library_path", "") or None)
         self._apply_toolbar_style()
+        self.catalogue.set_sort_spec(self._load_sort_spec())
+
+    def _load_sort_spec(self):
+        """Read the persisted sort spec from config as a list of
+        (field_id, ascending_bool) tuples. Stored as [[field, bool], ...]."""
+        raw = self.config.get("sort_spec", []) or []
+        spec = []
+        for item in raw:
+            if not isinstance(item, (list, tuple)) or len(item) < 2:
+                continue
+            spec.append((str(item[0]), bool(item[1])))
+        return spec
+
+    def _save_sort_spec(self, spec):
+        self.config.set("sort_spec", [[fid, bool(asc)] for fid, asc in spec])
+        self.config.save()
 
     # ==================================================================
     # View toggles / refresh
@@ -466,9 +489,11 @@ class MainWindow(Gtk.ApplicationWindow):
         if resp == Gtk.ResponseType.OK:
             spec = dlg.get_spec()
             self.catalogue.set_sort_spec(spec)
+            self._save_sort_spec(spec)
             self._set_status(self._describe_sort(spec))
         elif resp == Gtk.ResponseType.REJECT:  # Clear
             self.catalogue.set_sort_spec([])
+            self._save_sort_spec([])
             self._set_status("Sort cleared (default order).")
         dlg.destroy()
 

@@ -483,14 +483,85 @@ placeholder, not a crash).
 
 ---
 
-## 11. Known constraints & gotchas
+## 11. Deployment: desktop launcher & icon
+
+The app ships a fallback icon at `qdvc/data/qdvc-bibliotheca.svg`.
+`app.install_default_icon()` (called from `do_startup`) prefers a themed icon
+named `qdvc-bibliotheca` if the system icon theme has one, otherwise loads the
+bundled SVG directly from disk at several sizes via
+`Gtk.Window.set_default_icon_list`. `MainWindow` also sets the icon on its own
+window. `GLib.set_prgname("qdvc-bibliotheca")` (run at import in `app.py`) fixes
+the X11 `WM_CLASS`.
+
+For the **MATE panel** to show the app icon rather than a generic one, the
+running window's `WM_CLASS` must match the launcher's `StartupWMClass`. Install
+`~/.local/share/applications/qdvc-bibliotheca.desktop`:
+
+```
+[Desktop Entry]
+Type=Application
+Name=QDVC Bibliotheca
+Comment=Manage your personal collection of articles, papers and books
+Exec=python3 /full/path/to/qdvc-bibliotheca.py %U
+Path=/full/path/to
+Icon=qdvc-bibliotheca
+Terminal=false
+Categories=Office;Education;Literature;
+StartupNotify=true
+StartupWMClass=qdvc-bibliotheca
+Keywords=bibliography;references;bibtex;citations;research;
+```
+
+- `StartupWMClass=qdvc-bibliotheca` is the load-bearing line for the panel
+  icon; it must equal the value passed to `set_prgname`.
+- `Icon=qdvc-bibliotheca` is used by the launcher/menu. For it to resolve
+  outside the app, install the icon into the theme:
+  ```
+  mkdir -p ~/.local/share/icons/hicolor/scalable/apps
+  cp qdvc/data/qdvc-bibliotheca.svg \
+     ~/.local/share/icons/hicolor/scalable/apps/qdvc-bibliotheca.svg
+  gtk-update-icon-cache ~/.local/share/icons/hicolor 2>/dev/null || true
+  ```
+  (The *window/taskbar* icon works from the bundled SVG even without this; the
+  theme install is what makes the *menu/launcher* entry show it too.)
+- Verify with `xprop WM_CLASS` (click the window) — both strings should be
+  `qdvc-bibliotheca`. If the panel still shows the old icon, log out/in; MATE
+  caches launcher↔WM-class associations per session.
+- Refresh + validate:
+  ```
+  update-desktop-database ~/.local/share/applications
+  desktop-file-validate ~/.local/share/applications/qdvc-bibliotheca.desktop
+  ```
+
+Packaging note: `qdvc/data/*.svg` must be included as package data (it is
+loaded by filesystem path relative to `app.py`, so a zipimport/egg that doesn't
+extract data files would break the bundled-icon fallback — ship it unzipped or
+adjust the loader to use `importlib.resources`).
+
+---
+
+## 12. Persisted state (config keys)
+
+Beyond the §4.6 list, note `sort_spec` — the multi-key sort, stored as
+`[[field_id, ascending_bool], ...]` and round-tripped by
+`MainWindow._load_sort_spec` / `_save_sort_spec`. It is applied to the
+Catalogue in `_apply_prefs_to_widgets` at startup (before any workspace is
+open, which is fine — it's applied again on populate) and saved whenever the
+Sort dialog is accepted or cleared. Unknown field ids load harmlessly:
+`_sorted_records` skips any key absent from `SORT_KEYS`.
+
+---
+
+## 13. Known constraints & gotchas
 
 - **GTK 3 only.** A GTK 4 port would need: `ImageMenuItem` replacement (already
   done), `Gtk.Toolbar` (removed in 4), `override_font` (removed), and the
   clipboard API (rewritten around `Gdk.Clipboard`).
-- **`WM_CLASS` / panel icon** relies on `set_prgname` matching the `.desktop`
-  `StartupWMClass`; under Wayland, window placement and some class matching are
-  compositor-controlled.
+- **`WM_CLASS` / panel icon**: the app now ships a fallback icon and sets it
+  explicitly (see §11), so the window/taskbar icon should render even without a
+  themed icon installed. The MATE *launcher* association still relies on
+  `set_prgname` matching the `.desktop` `StartupWMClass`. Under Wayland, window
+  placement and some class matching are compositor-controlled.
 - **Notes vs frontmatter writes** must be ordered (flush notes before
   frontmatter writes) — see §4.2.
 - **Column-0 offset** in the master table is a recurring source of off-by-one

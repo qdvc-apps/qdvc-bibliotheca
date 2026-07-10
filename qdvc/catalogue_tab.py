@@ -86,11 +86,16 @@ class CatalogueTab(Gtk.Box):
         self.detail_widget = self._build_detail()
         self.paned_outer.pack1(self.sidebar_widget, False, False)
         self.paned_outer.pack2(self.paned_inner, True, False)
+        # Master pane gets the resize weight so extra width goes to the table,
+        # not the detail pane (which only needs enough room to read a
+        # reference and notes).
         self.paned_inner.pack1(self._build_master(), True, False)
-        self.paned_inner.pack2(self.detail_widget, True, False)
+        self.paned_inner.pack2(self.detail_widget, False, False)
 
         self.paned_outer.set_position(220)
-        self.paned_inner.set_position(430)
+        self.paned_inner.set_position(620)
+        # Keep the detail pane compact by default.
+        self.detail_widget.set_size_request(320, -1)
 
     # ------------------------------------------------------------------
     # Pane 1: sidebar
