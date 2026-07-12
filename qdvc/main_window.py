@@ -75,6 +75,8 @@ class MainWindow(Gtk.ApplicationWindow):
         self.catalogue.connect("selection-changed",
                                self._on_catalogue_selection)
         self.catalogue.connect("record-action", self._on_record_action)
+        self.catalogue.connect("goto-journal", self._on_goto_journal)
+        self.catalogue.set_style_change_callback(self._on_citation_style_chosen)
         self.doi_tab = DoiLookupTab()
         self.doi_tab.connect("goto-record", self._on_goto_record)
         self.authors_tab = AuthorsTab()
@@ -379,6 +381,7 @@ class MainWindow(Gtk.ApplicationWindow):
             self.config.get("fulltext_library_path", "") or None)
         self.catalogue.set_jflag_priority(self._jflag_priority_map())
         self.catalogue.set_workspace(ws)
+        self.catalogue.set_citation_style(self._saved_citation_style())
         self.authors_tab.set_workspace(ws)
         self.journals_tab.set_jflag_presets(self._jflag_presets())
         self.journals_tab.set_workspace(ws)
@@ -410,6 +413,7 @@ class MainWindow(Gtk.ApplicationWindow):
             return
         self.workspace.load(force_rescan=True)
         self.catalogue.set_workspace(self.workspace)
+        self.catalogue.set_citation_style(self._saved_citation_style())
         self.authors_tab.set_workspace(self.workspace)
         self.journals_tab.set_workspace(self.workspace)
         self.doi_tab.set_workspace(self.workspace)
@@ -440,11 +444,12 @@ class MainWindow(Gtk.ApplicationWindow):
             self._set_status("Nothing to import.")
             return
         try:
-            imported = self.workspace.import_bib_text(text)
+            imported, skipped_dois = self.workspace.import_bib_text(text)
         except Exception as exc:  # noqa: BLE001
             self._warn(f"Import failed:\n{exc}")
             return
         self.catalogue.set_workspace(self.workspace)
+        self.catalogue.set_citation_style(self._saved_citation_style())
         self.authors_tab.set_workspace(self.workspace)
         self.journals_tab.set_workspace(self.workspace)
         # optionally allocate the freshly-imported records to the chosen work
@@ -461,13 +466,30 @@ class MainWindow(Gtk.ApplicationWindow):
         if allocated:
             name = self.workspace.my_works[work_key].name
             msg += f" Allocated {allocated} to '{name}'."
+        if skipped_dois:
+            msg += (f" Skipped {len(skipped_dois)} with a DOI already in the "
+                    "catalogue.")
+            self._warn_skipped_dois(skipped_dois)
         self._set_status(msg)
+
+    def _warn_skipped_dois(self, skipped_dois):
+        lines = [f"\u2022 {key}: DOI {doi} already used by {existing}"
+                 for key, doi, existing in skipped_dois]
+        dlg = Gtk.MessageDialog(
+            transient_for=self, modal=True,
+            message_type=Gtk.MessageType.INFO, buttons=Gtk.ButtonsType.OK,
+            text="Some entries were not imported")
+        dlg.format_secondary_text(
+            "These entries share a DOI with a record already in your library, "
+            "so they were skipped to avoid duplicates:\n\n" + "\n".join(lines))
+        dlg.run()
+        dlg.destroy()
 
     # ==================================================================
     # Preferences
     # ==================================================================
     def _on_preferences(self, _item):
-        dlg = PreferencesDialog(self, self.config)
+        dlg = PreferencesDialog(self, self.config, workspace=self.workspace)
         if dlg.run() == Gtk.ResponseType.OK:
             dlg.apply()
             self._apply_prefs_to_widgets()
@@ -481,6 +503,9 @@ class MainWindow(Gtk.ApplicationWindow):
             self.config.get("fulltext_library_path", "") or None)
         self.catalogue.set_jflag_priority(self._jflag_priority_map())
         self.journals_tab.set_jflag_presets(self._jflag_presets())
+        # a CSL file may have been added/removed; refresh the Pane 3 dropdown
+        self.catalogue.refresh_csl_styles()
+        self.catalogue.set_citation_style(self._saved_citation_style())
         self._apply_toolbar_style()
         self.catalogue.set_sort_spec(self._load_sort_spec())
 
@@ -878,6 +903,30 @@ class MainWindow(Gtk.ApplicationWindow):
         # a nickname or J-Flag set changed: re-render Pane 2 so the Outlet and
         # J-Flags columns reflect it.
         self.catalogue.refresh_starred_journals()
+
+    def _on_goto_journal(self, _tab, journal_id):
+        # From the Catalogue record menu: switch to the Journals tab and
+        # highlight/scroll to the record's journal.
+        self.notebook.set_current_page(2)
+        self.journals_tab.reveal_journal(journal_id)
+
+    def _on_citation_style_chosen(self, style_id):
+        # Persist the chosen citation style per workspace (keyed by path).
+        if not self.workspace:
+            return
+        styles = dict(self.config.get("csl_styles", {}) or {})
+        styles[str(self.workspace.root)] = style_id
+        self.config.set("csl_styles", styles)
+        self.config.save()
+
+    def _saved_citation_style(self):
+        """The persisted citation style id for the current workspace, or the
+        APA sentinel when none is stored."""
+        from .catalogue_tab import APA_STYLE_ID
+        if not self.workspace:
+            return APA_STYLE_ID
+        styles = self.config.get("csl_styles", {}) or {}
+        return styles.get(str(self.workspace.root), APA_STYLE_ID)
 
     # ==================================================================
     # Lifecycle / helpers

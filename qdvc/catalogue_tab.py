@@ -10,6 +10,7 @@ from gi.repository import Gtk, Gdk, Pango, GObject  # noqa: E402
 from .platform_utils import (open_with_default_app,  # noqa: E402
                              open_with_text_editor)
 from .md_highlight import MarkdownHighlighter  # noqa: E402
+from . import csl as csl_mod  # noqa: E402
 
 
 # Sidebar node kinds
@@ -22,6 +23,9 @@ NODE_JOURNAL = "journal"
 NODE_FULLTEXT = "fulltext"   # key in {"pdf","epub","none"}
 NODE_DOI = "doi"             # key in {"set","unset"}
 NODE_TEMP = "temp"  # transient "query results" node at the bottom
+
+# Sentinel id for the built-in APA renderer in the citation-style dropdown.
+APA_STYLE_ID = "__apa__"
 
 
 def _year_key(r):
@@ -63,6 +67,8 @@ class CatalogueTab(Gtk.Box):
         # emitted (action_name) for record context-menu actions the main
         # window handles (reveal/edit/open/rename) against the current record
         "record-action": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
+        # emitted (journal_id) to jump to a record's journal in the Journals tab
+        "goto-journal": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
     }
 
     def __init__(self):
@@ -86,6 +92,12 @@ class CatalogueTab(Gtk.Box):
         # J-Flag -> priority number, used to order the J-Flags column. Lower
         # numbers display first. Populated from config via set_jflag_priority.
         self._jflag_priority = {}
+        # Citation style: "__apa__" for the built-in renderer, else a CSL
+        # filename from the workspace's csl/ folder. A callback (set by the
+        # main window) persists the choice per workspace.
+        self._current_style = APA_STYLE_ID
+        self._style_change_cb = None
+        self._suppress_style_change = False
 
         self.paned_outer = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
         self.paned_inner = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
@@ -162,13 +174,13 @@ class CatalogueTab(Gtk.Box):
             None, ["view-list-symbolic", "By type", "", "", n, ""])
         type_icons = {
             "Journal article": "text-x-generic",
-            "Conference paper": "presentation",
+            "Proceedings": "presentation",
             "Book chapter": "x-office-document",
             "Book": "accessories-dictionary",
             "Webpage": "text-html",
             "Other": "emblem-documents",
         }
-        for label in ["Journal article", "Book chapter",
+        for label in ["Journal article", "Proceedings", "Book chapter",
                       "Book", "Webpage", "Other"]:
             self.side_store.append(
                 by_type, [type_icons.get(label, "text-x-generic"),
@@ -218,8 +230,10 @@ class CatalogueTab(Gtk.Box):
             None, ["starred", "Starred journals", "", "", n, ""])
         if self.workspace:
             for j in self.workspace.starred_journals():
+                # Show the nickname where one is set, else the full name.
+                label = j.nickname or j.display_name
                 self.side_store.append(
-                    starred_journals_root, ["starred", j.display_name,
+                    starred_journals_root, ["starred", label,
                                             NODE_JOURNAL, j.journal_id, n,
                                             clabel(len(j.record_ids))])
 
@@ -445,6 +459,8 @@ class CatalogueTab(Gtk.Box):
         self.master_view = Gtk.TreeView(model=self.master_filter)
         self.master_view.connect("button-press-event",
                                  self._on_master_button_press)
+        # Keyboard "Menu" key (and Shift+F10) fires "popup-menu".
+        self.master_view.connect("popup-menu", self._on_master_popup_menu)
 
         # PDF indicator column (icon only)
         pdf_r = Gtk.CellRendererPixbuf()
@@ -588,9 +604,23 @@ class CatalogueTab(Gtk.Box):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         box.set_border_width(6)
 
+        # Header row: "Reference" label on the left, a citation-style dropdown
+        # on the right to switch between the built-in APA renderer and any
+        # custom CSL files found in the workspace's csl/ folder.
+        ref_head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         ref_lbl = Gtk.Label(xalign=0)
-        ref_lbl.set_markup("<b>Reference (APA 7)</b>")
-        box.pack_start(ref_lbl, False, False, 2)
+        ref_lbl.set_markup("<b>Reference</b>")
+        ref_head.pack_start(ref_lbl, False, False, 0)
+        self.style_combo = Gtk.ComboBoxText()
+        self.style_combo.set_tooltip_text(
+            "Citation style: the built-in APA 7 renderer, or a custom CSL "
+            "file from the workspace's csl/ folder")
+        self.style_combo.connect("changed", self._on_style_changed)
+        ref_head.pack_end(self.style_combo, False, False, 0)
+        style_caption = Gtk.Label(label="Style:", xalign=1)
+        style_caption.get_style_context().add_class("dim-label")
+        ref_head.pack_end(style_caption, False, False, 0)
+        box.pack_start(ref_head, False, False, 2)
 
         ref_sw = Gtk.ScrolledWindow()
         ref_sw.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
@@ -650,15 +680,69 @@ class CatalogueTab(Gtk.Box):
         if not on:
             self.open_pdf_btn.set_sensitive(False)
 
+    def _active_csl_path(self):
+        """The path of the currently-selected CSL file, or None when the
+        built-in APA renderer is active (or the file has gone missing)."""
+        if self._current_style == APA_STYLE_ID or not self.workspace:
+            return None
+        p = self.workspace.csl_path(self._current_style)
+        return str(p) if p else None
+
+    def _reference_markup(self, rec):
+        csl_path = self._active_csl_path()
+        if csl_path:
+            return csl_mod.render_markup(rec.bib(), csl_path)
+        return rec.apa_markup()
+
+    def _reference_plain(self, rec):
+        csl_path = self._active_csl_path()
+        if csl_path:
+            return csl_mod.render_plain(rec.bib(), csl_path)
+        return rec.apa_plain()
+
+    def _render_reference(self, rec):
+        """Render the reference label for *rec* using the active style."""
+        try:
+            self.ref_label.set_markup(self._reference_markup(rec))
+        except Exception:  # noqa: BLE001
+            self.ref_label.set_text(self._reference_plain(rec))
+
+    def _populate_style_combo(self):
+        """Fill the citation-style dropdown: the built-in APA renderer plus
+        every CSL file in the workspace, listed by filename. Restores the
+        persisted selection where possible."""
+        self._suppress_style_change = True
+        self.style_combo.remove_all()
+        self.style_combo.append(APA_STYLE_ID, "APA 7 (built-in)")
+        files = self.workspace.list_csl_files() if self.workspace else []
+        for name in files:
+            self.style_combo.append(name, name)
+        # Restore the current style if it is still valid, else fall back.
+        if self._current_style != APA_STYLE_ID and \
+                self._current_style not in files:
+            self._current_style = APA_STYLE_ID
+        self.style_combo.set_active_id(self._current_style)
+        self._suppress_style_change = False
+
+    def _on_style_changed(self, combo):
+        if self._suppress_style_change:
+            return
+        style_id = combo.get_active_id()
+        if not style_id:
+            return
+        self._current_style = style_id
+        # persist per-workspace via the main window's callback
+        if self._style_change_cb:
+            self._style_change_cb(style_id)
+        # re-render the currently shown reference
+        if self._current_record:
+            self._render_reference(self._current_record)
+
     def _show_detail(self, rec):
         # persist any pending notes for the previous record first
         self._flush_notes()
         self._current_record = rec
-        markup = rec.apa_markup()
-        try:
-            self.ref_label.set_markup(markup)
-        except Exception:
-            self.ref_label.set_text(rec.apa_plain())
+        self._render_reference(rec)
 
         fm, body = rec.read_notes()
         self._current_frontmatter = fm
@@ -724,15 +808,15 @@ class CatalogueTab(Gtk.Box):
         # Pango markup isn't a clipboard format; provide the visible rich text
         # via the label's selection semantics by copying plain with markup
         # intent. For true rich copy we emit both plain and a simple HTML.
-        plain = self._current_record.apa_plain()
-        html = _markup_to_html(self._current_record.apa_markup())
+        plain = self._reference_plain(self._current_record)
+        html = _markup_to_html(self._reference_markup(self._current_record))
         _set_clipboard_rich(clip, plain, html)
 
     def _copy_plain(self, _btn):
         if not self._current_record:
             return
         clip = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
-        clip.set_text(self._current_record.apa_plain(), -1)
+        clip.set_text(self._reference_plain(self._current_record), -1)
         clip.store()
 
     # ------------------------------------------------------------------
@@ -751,7 +835,34 @@ class CatalogueTab(Gtk.Box):
         rec = self.workspace.get(bid) if self.workspace else None
         if not rec:
             return False
+        menu = self._build_record_menu(rec)
+        menu.popup_at_pointer(event)
+        return True
 
+    def _on_master_popup_menu(self, _widget):
+        """Keyboard Menu key (or Shift+F10): pop up the record menu for the
+        selected row, anchored to that row so it appears in a sensible place."""
+        rec = self._current_record
+        if not rec:
+            return False
+        menu = self._build_record_menu(rec)
+        # Anchor to the selected row's rectangle where possible.
+        model, it = self.master_view.get_selection().get_selected()
+        if it is not None:
+            path = model.get_path(it)
+            col = self.master_view.get_column(1)
+            rect = self.master_view.get_cell_area(path, col)
+            menu.popup_at_rect(self.master_view.get_window(), rect,
+                               Gdk.Gravity.SOUTH_WEST, Gdk.Gravity.NORTH_WEST,
+                               None)
+        else:
+            menu.popup_at_widget(self.master_view, Gdk.Gravity.CENTER,
+                                 Gdk.Gravity.NORTH, None)
+        return True
+
+    def _build_record_menu(self, rec):
+        """Build the record context menu for *rec*. Shared by the right-click
+        handler and the keyboard popup-menu handler."""
         fm, _ = rec.read_notes()
         has_pdf = bool(fm.get("pdf"))
         has_epub = bool(fm.get("epub"))
@@ -791,6 +902,20 @@ class CatalogueTab(Gtk.Box):
 
         menu.append(Gtk.SeparatorMenuItem())
 
+        # Go to journal (only for journal articles with a known journal).
+        journal = self.workspace.journal_for_record(rec) if self.workspace \
+            else None
+        mi_journal = _img_menu_item("Go to journal", "starred")
+        if journal:
+            jid = journal.journal_id
+            mi_journal.connect(
+                "activate", lambda *_: self.emit("goto-journal", jid))
+        else:
+            mi_journal.set_sensitive(False)
+        menu.append(mi_journal)
+
+        menu.append(Gtk.SeparatorMenuItem())
+
         mi = _img_menu_item("Copy Bibliotheca ID", "edit-copy")
         mi.connect("activate", lambda *_: self._copy_bibliotheca_id(rec))
         menu.append(mi)
@@ -821,8 +946,7 @@ class CatalogueTab(Gtk.Box):
             menu.append(mi)
 
         menu.show_all()
-        menu.popup_at_pointer(event)
-        return True
+        return menu
 
     def _copy_bibliotheca_id(self, rec):
         clip = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
@@ -953,6 +1077,7 @@ class CatalogueTab(Gtk.Box):
         self._current_record = None
         self._notes_dirty = False
         self._active_filter = (NODE_ALL, "")
+        self._populate_style_combo()
         self._rebuild_sidebar()
         if workspace:
             self._populate_master(workspace.all_records())
@@ -1023,6 +1148,33 @@ class CatalogueTab(Gtk.Box):
 
     def set_fulltext_root(self, path):
         self._fulltext_root = path or None
+
+    def set_style_change_callback(self, cb):
+        """Register a callback(style_id) invoked when the user picks a citation
+        style, so the main window can persist it per-workspace."""
+        self._style_change_cb = cb
+
+    def set_citation_style(self, style_id):
+        """Set the active citation style (APA_STYLE_ID or a CSL filename)
+        without firing the persistence callback. Re-renders the shown
+        reference and updates the dropdown selection."""
+        self._current_style = style_id or APA_STYLE_ID
+        self._suppress_style_change = True
+        # only select if the id is present in the combo; else leave as APA
+        if not self.style_combo.set_active_id(self._current_style):
+            self._current_style = APA_STYLE_ID
+            self.style_combo.set_active_id(APA_STYLE_ID)
+        self._suppress_style_change = False
+        if self._current_record:
+            self._render_reference(self._current_record)
+
+    def refresh_csl_styles(self):
+        """Re-scan the workspace's csl/ folder and repopulate the dropdown
+        (e.g. after the user drops in a new .csl file and reopens Preferences).
+        """
+        self._populate_style_combo()
+        if self._current_record:
+            self._render_reference(self._current_record)
 
     def refresh_starred_authors(self):
         """Rebuild the sidebar so the Starred Authors section reflects

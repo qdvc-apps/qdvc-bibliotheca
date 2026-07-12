@@ -37,6 +37,8 @@ reading happen per-record, on demand.
 - PyGObject + GTK 3 (`gi`, `gi.repository.Gtk` version "3.0").
 - PyYAML (hard dependency).
 - `bibtexparser` (optional; a built-in fallback parser is used when absent).
+- `citeproc-py` (optional; enables the CSL citation-style renderer in `csl.py`.
+  Absent, the citation-style dropdown offers only the built-in APA renderer).
 
 GTK 4 is **not** supported. Several deprecated-in-GTK4 idioms are used
 deliberately (see §8).
@@ -56,6 +58,7 @@ qdvc/
     workspace.py           MODEL. No GTK. Records, MyWork, Author, Journal,
                            Workspace.
     apa.py                 BibTeX-entry -> APA 7 formatter (markup + plain).
+    csl.py                 Optional CSL renderer (via citeproc-py) + fallback.
     md_highlight.py        Regex Markdown highlighter for the notes buffer.
     platform_utils.py      Launch system apps (viewer, editor, file manager).
     main_window.py         MainWindow (menubar/toolbar/notebook) + ImportDialog.
@@ -79,6 +82,7 @@ qdvc/
     authors/<SURNAME_GivenNames>.yml       Derived author records + star state.
     journals/<nickname-or-slug>.yml        Derived journal records + star,
                                            nickname, and J-Flags.
+    csl/*.csl                              Optional custom CSL citation styles.
     .qdvc-index.json                       Cache (safe to delete; regenerated).
 ```
 
@@ -188,7 +192,11 @@ when one is set (`JBIB.yml`), else the slug of the full name
 (`journal-of-bibliotheca.yml`); `Workspace.journal_path_for` decides. The
 in-memory key (`journal_id`) is always the slug, so state survives a nickname
 change. `Journal.to_yaml_dict` builds the dict as name, nickname (if any),
-starred, jflags, and `save` dumps with `sort_keys=False`.
+starred, jflags, and `save` dumps with `sort_keys=False`. A nickname may
+contain **only ASCII letters** (`A-Za-z`) and must be unique
+(case-insensitively) across journals; `set_journal_nickname` raises
+`ValueError` on an invalid character or a collision, so YAML filenames never
+clash.
 
 `{"version": INDEX_VERSION, "records": [ {…}, … ]}`. Each record stores only
 display/index fields: `bibliotheca_id, bib_path, md_path, entrytype,
@@ -205,12 +213,16 @@ referenced `.bib` path no longer exists.
 (falling back to `~/.config`). `DEFAULTS` holds `last_workspace`,
 `recent_workspaces`, and `window` size. Additional keys set via
 `Config.set`/`get`: `notes_font`, `file_manager`, `fulltext_library_path`,
-`reopen_last`, `autosave_notes`, `toolbar_style`, `jflags`. The `jflags` key is
-a list of `{flag, priority}` dicts — the J-Flag presets and their priority
-numbers (lower = shown first in the Catalogue's J-Flags column); read via
-`MainWindow._jflag_presets`/`_jflag_priority_map`. When you add a preference,
-add it in `preferences.py` (widget + `apply()`) and read it where used; no
-schema migration is needed because `Config.get` takes a default.
+`reopen_last`, `autosave_notes`, `toolbar_style`, `jflags`, `csl_styles`. The
+`jflags` key is a list of `{flag, priority}` dicts — the J-Flag presets and
+their priority numbers (lower = shown first in the Catalogue's J-Flags column);
+read via `MainWindow._jflag_presets`/`_jflag_priority_map`. The `csl_styles`
+key is a `{workspace_root_path: style_id}` map persisting the chosen citation
+style per workspace (`style_id` is the `APA_STYLE_ID` sentinel or a CSL
+filename); read via `MainWindow._saved_citation_style` and written by
+`_on_citation_style_chosen`. When you add a preference, add it in
+`preferences.py` (widget + `apply()`) and read it where used; no schema
+migration is needed because `Config.get` takes a default.
 
 ---
 
@@ -271,13 +283,18 @@ load(force_rescan=False):
 `records_for_work(key)`, `records_for_author(author_id)`, `all_authors`,
 `starred_authors`, `all_journals`, `starred_journals`,
 `records_for_journal(journal_id)`, `journal_for_record(rec)` (None when the
-record is not a journal article), `lookup_doi(doi)`, `get(bibliotheca_id)`.
+record is not a journal article), `lookup_doi(doi)`, `get(bibliotheca_id)`,
+`list_csl_files()` (CSL filenames in `csl/`, sorted), `csl_path(filename)`.
 
 ### 5.6 Mutation API
 
 - `import_bib_text(text)` / `import_bib_file(path)` — split, file each new
   entry under its shard using the citation key as the `bibliotheca_id`, skip
-  existing ids, then rebuild DOI index + authors + save index.
+  existing ids, and **refuse** any entry whose DOI already appears in the
+  catalogue (guarding against duplicates), then rebuild DOI index + authors +
+  journals + save index. Returns `(imported_ids, skipped_dois)`, where
+  `skipped_dois` is a list of `(citation_key, doi, existing_id)` tuples;
+  `MainWindow._on_import` surfaces those in a dialog.
 - `rename_record(old, new)` — moves both paired files, updates in-memory
   record, rewrites every `my_works` reference (`cites` and `published_as`),
   rebuilds authors + index. Raises `ValueError` on empty/invalid/collision.
@@ -361,10 +378,13 @@ journals, entities escaped). `format_apa_plain(entry)` strips it to text.
   (article, inproceedings, book, inbook/incollection, online/misc, …), with
   `_render_online` as the fallback.
 - `TYPE_LABELS` / `type_label()` map BibTeX entry types to the human labels the
-  UI filters on ("Journal article", "Conference paper", "Book chapter", "Book",
+  UI filters on ("Journal article", "Proceedings", "Book chapter", "Book",
   "Webpage", "Other"). **These strings are load-bearing**: the sidebar "By
   type" filter, `records_by_type`, and `Record.outlet` all compare against
-  them. Change them in one place only.
+  them. Change them in one place only. `type_label(entrytype, booktitle=None)`
+  takes an optional booktitle so an `incollection` whose `booktitle` begins
+  with "Proceedings of" is classed as "Proceedings" rather than "Book chapter";
+  callers in `workspace._scan`/`import_bib_text` pass `e.get("booktitle")`.
 - Author name handling: `split_name` handles "Surname, Given" and
   "Given Surname"; `author_tokens` returns `(surname, given)` pairs;
   `format_author_list` builds the APA `A, B., & C.` string (≤20 authors, then
@@ -415,11 +435,11 @@ Three panes in nested `Gtk.Paned`:
   `(icon_name, label, kind, key, pango_style_int, count_str)`. Node "kind"
   constants: `NODE_ALL, NODE_TYPE, NODE_WORK, NODE_WORKS_ROOT, NODE_AUTHOR,
   NODE_JOURNAL, NODE_FULLTEXT, NODE_DOI, NODE_TEMP`. Sections: All articles / By
-  type (Journal article / Book chapter / Book / Webpage / Other — note
-  **Conference paper is not listed** as a filter, though records may still carry
-  that type label) / By full-text (PDF available / EPUB available / Not
-  available, keys `pdf`/`epub`/`none`) / By DOI status (DOI is set / not set,
-  keys `set`/`unset`) / My works / Starred authors / Starred journals.
+  type (Journal article / Proceedings / Book chapter / Book / Webpage / Other)
+  / By full-text (PDF available / EPUB available / Not available, keys
+  `pdf`/`epub`/`none`) / By DOI status (DOI is set / not set, keys
+  `set`/`unset`) / My works / Starred authors / Starred journals (each starred
+  journal is labelled by its nickname where one is set, else the full name).
   Selecting a node calls `_apply_filter(kind, key)`, which repopulates Pane 2
   and records `_active_filter` (so `refresh_current_view` can re-apply it). A
   second, right-aligned column shows the number of articles each filter row
@@ -459,23 +479,35 @@ Three panes in nested `Gtk.Paned`:
   column is fixed-width so 4-digit years aren't ellipsised. A `filter_new()`
   model backs the search box.
 
-  - **Right-click** (`_on_master_button_press`): the primary record menu. It
-    carries, top to bottom (all via `_img_menu_item`, so all have icons):
-    Reveal .bib / Reveal .md in File Manager; Open .bib / Open .md in Text
-    Editor; Open PDF; Open EPUB (the last two disabled when that full-text is
-    absent); Copy Bibliotheca ID; Rename Bibliotheca ID…; Allocate to My
-    Works…; then the full-text management block Set PDF… / Set EPUB… / Remove
-    full-text link(s). The "reveal/edit/open/rename/allocate" items don't act
-    locally — they call `self.emit("record-action", <name>)`, and
-    `MainWindow._on_record_action` routes each to the existing handler acting
-    on the current record. This is the successor to the old menubar **Record**
-    menu, which has been removed. Copy Bibliotheca ID (`_copy_bibliotheca_id`)
-    and the Set/Remove full-text items are handled inside the tab. This
-    right-click menu is the only place to *attach* full-text.
+  - **Record menu** (`_build_record_menu(rec)`): the primary record menu,
+    shared by the mouse **right-click** (`_on_master_button_press`) and the
+    keyboard **Menu key / Shift+F10** (`_on_master_popup_menu`, connected to the
+    TreeView's `popup-menu` signal; it anchors the menu to the selected row's
+    rectangle). It carries, top to bottom (all via `_img_menu_item`, so all have
+    icons): Reveal .bib / Reveal .md in File Manager; Open .bib / Open .md in
+    Text Editor; Open PDF; Open EPUB (the last two disabled when that full-text
+    is absent); **Go to journal** (disabled unless the record is a journal
+    article with a known journal — emits `goto-journal(journal_id)`); Copy
+    Bibliotheca ID; Rename Bibliotheca ID…; Allocate to My Works…; then the
+    full-text management block Set PDF… / Set EPUB… / Remove full-text link(s).
+    The "reveal/edit/open/rename/allocate" items don't act locally — they call
+    `self.emit("record-action", <name>)`, and `MainWindow._on_record_action`
+    routes each to the existing handler acting on the current record. This is
+    the successor to the old menubar **Record** menu, which has been removed.
+    Copy Bibliotheca ID (`_copy_bibliotheca_id`) and the Set/Remove full-text
+    items are handled inside the tab. This menu is the only place to *attach*
+    full-text.
 
-- **Pane 3 (detail)** — read-only APA reference label (Pango markup), Copy
-  (rich) / Copy (plain) buttons, an **Open PDF** button (shown enabled only
-  when a PDF is set), the editable notes `TextView`, and a status line.
+- **Pane 3 (detail)** — a header row with a **citation-style dropdown**
+  (`style_combo`: "APA 7 (built-in)" plus every CSL file from the workspace's
+  `csl/` folder, listed by filename), the reference label (Pango markup),
+  Copy (rich) / Copy (plain) buttons, an **Open PDF** button (shown enabled
+  only when a PDF is set), the editable notes `TextView`, and a status line.
+  `_render_reference`/`_reference_markup`/`_reference_plain` route through the
+  built-in APA renderer when the style is `APA_STYLE_ID`, else through
+  `csl.render_markup`/`render_plain` with the selected CSL file. Changing the
+  dropdown fires `_on_style_changed`, which re-renders and calls the
+  `_style_change_cb` so the main window persists the choice per workspace.
 
 **Multi-key sorting**: sorting is done in the model layer, not via GTK's
 single-column `set_sort_column_id`. The tab holds `_sort_spec`, an ordered list
@@ -517,7 +549,8 @@ this back to `set_with_data`.
 
 Public methods the main window calls: `set_workspace`, `set_fulltext_root`,
 `set_notes_font`, `set_autosave`, `set_jflag_priority`, `set_sidebar_visible`,
-`set_detail_visible`, `refresh_current_view`, `refresh_starred_authors`,
+`set_detail_visible`, `set_style_change_callback`, `set_citation_style`,
+`refresh_csl_styles`, `refresh_current_view`, `refresh_starred_authors`,
 `refresh_starred_journals`, `show_author_works`, `show_journal_works`,
 `reveal_record`, `current_record`, `flush_notes`, `set_sort_spec`,
 `get_sort_spec`.
@@ -539,15 +572,20 @@ jflags_joined, journal_id, article_count) behind a filter (text + "starred
 only"). Same `CellRendererToggle` + `convert_path_to_child_path` star pattern as
 the Authors tab. Two extra actions at the bottom: **Set nickname…**
 (`_on_set_nickname` → `Workspace.set_journal_nickname`, which renames the YAML
-file) and **Set J-Flags…** (`_on_set_jflags` — a checklist of the presets from
-`set_jflag_presets`, plus any non-preset flag already on the journal so
-hand-added flags aren't dropped → `Workspace.set_journal_jflags`). Emits
-`star-changed(journal_id, bool)`, `show-journal-works(journal_id)`, and
-`journal-changed()`. The main window relays these to
-`catalogue.refresh_starred_journals()`, `catalogue.show_journal_works()`, and
-(for `journal-changed`) `catalogue.refresh_starred_journals()` again so the
-Catalogue's Outlet/J-Flags columns re-render. `set_jflag_presets` is pushed from
+file; a `ValueError` from the model — invalid character or a collision — is
+caught and shown via `_warn`) and **Set J-Flags…** (`_on_set_jflags` — a
+checklist of the presets from `set_jflag_presets`, plus any non-preset flag
+already on the journal so hand-added flags aren't dropped →
+`Workspace.set_journal_jflags`). Emits `star-changed(journal_id, bool)`,
+`show-journal-works(journal_id)`, and `journal-changed()`. The main window
+relays these to `catalogue.refresh_starred_journals()`,
+`catalogue.show_journal_works()`, and (for `journal-changed`)
+`catalogue.refresh_starred_journals()` again so the Catalogue's Outlet/J-Flags
+columns re-render. `set_jflag_presets` is pushed from
 `MainWindow._jflag_presets()` on workspace open and on preference changes.
+`reveal_journal(journal_id)` clears any active filter, then selects and
+scrolls the matching row into view — used by the Catalogue's "Go to journal"
+(`MainWindow._on_goto_journal` switches to this tab first).
 
 ### 8.4 DOI tab (`doi_tab.py`)
 
@@ -574,13 +612,18 @@ the main window routes to the Catalogue (`reveal_record`). On miss, shows
   calls `catalogue.refresh_after_allocation()` (rebuild sidebar + re-apply the
   active filter). Used both from the record right-click "Allocate to My Works…"
   and the allocate-after-import path.
-- `PreferencesDialog` — font, file-manager command, full-text library path,
-  reopen-last, autosave, toolbar style, and a **J-Flags** editor (an editable
-  `flag`/`priority` list with Add/Remove, persisted to the `jflags` config key
-  as `{flag, priority}` dicts). `apply()` writes to `Config`;
-  `MainWindow._apply_prefs_to_widgets` pushes values into the widgets, calls
-  `_apply_toolbar_style`, and pushes the J-Flag priority map into the Catalogue
-  and the presets into the Journals tab.
+- `PreferencesDialog` — a `Gtk.Notebook` with three tabs: **General** (font,
+  file-manager command, full-text library path, reopen-last, autosave, toolbar
+  style); **J-Flags** (an editable `flag`/`priority` list with Add/Remove,
+  persisted to the `jflags` config key as `{flag, priority}` dicts); and
+  **CSL** (a read-only list of the `.csl` files in the workspace's `csl/`
+  folder, by filename, with a status line noting whether `citeproc-py` is
+  installed). It takes an optional `workspace=` so the CSL tab can list files.
+  `apply()` writes to `Config`; `MainWindow._apply_prefs_to_widgets` pushes
+  values into the widgets, calls `_apply_toolbar_style`, pushes the J-Flag
+  priority map into the Catalogue and the presets into the Journals tab, and
+  calls `catalogue.refresh_csl_styles()` + `set_citation_style(...)` in case a
+  CSL file was added or removed.
 - `MyWorkEditor` — two-list citation picker + name + `published_as` combo;
   keeps its cited list alphabetical and inserts additions at their sorted slot.
 
@@ -642,7 +685,8 @@ placeholder, not a crash).
 - **Add a sortable field** → add an entry to `SORT_KEYS` (id → key function)
   and `SORT_LABELS` (id → label, in display order) in `catalogue_tab.py`. The
   sort dialog and the sort engine pick it up automatically.
-- **Add a preference** → widget + `apply()` in `preferences.py`; read via
+- **Add a preference** → widget + `apply()` in the relevant tab of
+  `preferences.py` (General / J-Flags / CSL); read via
   `config.get(key, default)`; if it affects widgets live, push it in
   `_apply_prefs_to_widgets`.
 - **Tweak journals / J-Flags / nicknames** → the `Journal` dataclass and
@@ -650,7 +694,12 @@ placeholder, not a crash).
   `catalogue_tab._outlet_markup`/`_jflags_display`/`_order_jflags`; the editors
   in `journals_tab.py`; the presets in `preferences.py` + `MainWindow`'s
   `_jflag_presets`/`_jflag_priority_map`.
-- **Add a BibTeX entry type / tweak APA** → `apa._RENDERERS`, `TYPE_LABELS`.
+- **Tweak CSL rendering** → `csl.py` (`entry_to_csl_json` for the BibTeX→CSL-JSON
+  mapping, `_html_to_pango`/`_html_to_plain` for output); the dropdown +
+  rendering in `catalogue_tab` (`_populate_style_combo`, `_reference_markup`);
+  persistence in `MainWindow._saved_citation_style`/`_on_citation_style_chosen`.
+- **Add a BibTeX entry type / tweak APA** → `apa._RENDERERS`, `TYPE_LABELS`,
+  and `type_label` (which also inspects `booktitle` for the Proceedings case).
   If you add a new human label, update `Record.outlet` and any By-type list.
 - **Change the cached record schema** → update `Record`, `_scan`, `_load_index`,
   `_save_index`, and **bump `INDEX_VERSION`**.

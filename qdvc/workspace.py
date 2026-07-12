@@ -198,8 +198,10 @@ class Record:
     @property
     def outlet(self) -> str:
         """Display value for the 'Outlet' column: the journal for journal
-        articles, the book title for book chapters, an em dash otherwise."""
-        if self.type_label in ("Journal article", "Book chapter"):
+        articles, the book/proceedings title for chapters and proceedings, an
+        em dash otherwise."""
+        if self.type_label in ("Journal article", "Book chapter",
+                               "Proceedings"):
             return self.journal or "\u2014"
         return "\u2014"
 
@@ -375,6 +377,28 @@ class Workspace:
         return self.root / "journals"
 
     @property
+    def csl_dir(self) -> Path:
+        return self.root / "csl"
+
+    def list_csl_files(self) -> list[str]:
+        """Return the file names (not paths) of the CSL style files in the
+        workspace's ``csl/`` folder, sorted case-insensitively. Files are
+        listed by filename; no metadata inside the CSL is read."""
+        d = self.csl_dir
+        if not d.is_dir():
+            return []
+        names = [f.name for f in d.glob("*.csl") if f.is_file()]
+        return sorted(names, key=str.lower)
+
+    def csl_path(self, filename: str) -> Path | None:
+        """Resolve a CSL filename (as returned by list_csl_files) to its path,
+        or None if it is not present."""
+        if not filename:
+            return None
+        p = self.csl_dir / filename
+        return p if p.is_file() else None
+
+    @property
     def index_path(self) -> Path:
         return self.root / INDEX_FILENAME
 
@@ -438,7 +462,8 @@ class Workspace:
                 bib_path=str(bib_file),
                 md_path=str(md) if md.exists() else str(md),
                 entrytype=(e.get("ENTRYTYPE") or "misc").lower(),
-                type_label=apa.type_label(e.get("ENTRYTYPE") or "misc"),
+                type_label=apa.type_label(e.get("ENTRYTYPE") or "misc",
+                                          e.get("booktitle")),
                 author=apa._clean(e.get("author") or e.get("editor")),
                 year=apa._clean(e.get("year")),
                 title=apa._clean(e.get("title")),
@@ -757,11 +782,36 @@ class Workspace:
 
     def set_journal_nickname(self, journal_id: str, nickname: str) -> None:
         """Set (or clear) a journal's nickname, renaming its .yml file to the
-        nickname (or back to the slug when cleared)."""
+        nickname (or back to the slug when cleared).
+
+        Raises ValueError if the nickname contains anything other than A-Z/a-z
+        letters, or if it collides with another journal's nickname or that
+        journal's on-disk .yml stem (to prevent YAML filename collisions).
+        """
         journal = self.journals.get(journal_id)
         if not journal:
             return
         nickname = (nickname or "").strip()
+        if nickname:
+            if not _JOURNAL_NICKNAME_RE.fullmatch(nickname):
+                raise ValueError(
+                    "A nickname may contain only the letters A-Z and a-z.")
+            # collision check: no other journal may already use this nickname,
+            # and the resulting file stem must not clash with another journal's.
+            new_stem = nickname.lower()
+            for other_id, other in self.journals.items():
+                if other_id == journal_id:
+                    continue
+                if other.nickname and other.nickname.lower() == new_stem:
+                    raise ValueError(
+                        f"The nickname '{nickname}' is already used by "
+                        f"'{other.name}'.")
+                other_stem = (_sanitise_stem(other.nickname)
+                              if other.nickname else other.journal_id)
+                if other_stem.lower() == _sanitise_stem(nickname).lower():
+                    raise ValueError(
+                        f"The nickname '{nickname}' collides with an existing "
+                        f"journal file.")
         old_path = Path(journal.path) if journal.path else None
         journal.nickname = nickname
         new_path = self.journal_path_for(journal)
@@ -837,15 +887,20 @@ class Workspace:
         text = Path(source).read_text(encoding="utf-8", errors="replace")
         return self.import_bib_text(text)
 
-    def import_bib_text(self, text: str) -> list[str]:
+    def import_bib_text(self, text: str) -> tuple[list[str], list[tuple]]:
         """Import BibTeX from a raw string that may contain several entries.
 
         Each entry is filed under bibtex/<shard>/<bibliotheca_id>.bib using
-        its citation key as the bibliotheca_id. Returns the list of imported
-        ids. Existing ids are skipped (not overwritten).
+        its citation key as the bibliotheca_id. Entries whose id already exists
+        are skipped, and entries whose DOI matches an already-catalogued record
+        are refused (never written). Returns ``(imported_ids,
+        skipped_dois)`` where ``skipped_dois`` is a list of
+        ``(citation_key, doi, existing_bibliotheca_id)`` tuples for the
+        DOI-collision refusals.
         """
         entries = _split_bib_entries(text or "")
         imported: list[str] = []
+        skipped_dois: list[tuple] = []
         for raw_entry, key in entries:
             if not key:
                 continue
@@ -853,6 +908,14 @@ class Workspace:
             dest = self.bib_path_for(bid)
             if dest.exists() or bid in self.records:
                 continue
+            # Refuse an entry whose DOI is already in the catalogue, so we do
+            # not create a duplicate of an existing article.
+            entry_doi = _normalise_doi(_parse_bib_fallback(raw_entry).get("doi"))
+            if entry_doi:
+                existing = self._doi_index.get(entry_doi.lower())
+                if existing:
+                    skipped_dois.append((key, entry_doi, existing))
+                    continue
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_text(raw_entry.strip() + "\n", encoding="utf-8")
             e = parse_bibtex(dest)
@@ -861,7 +924,8 @@ class Workspace:
                 bib_path=str(dest),
                 md_path=str(self.md_path_for(bid)),
                 entrytype=(e.get("ENTRYTYPE") or "misc").lower(),
-                type_label=apa.type_label(e.get("ENTRYTYPE") or "misc"),
+                type_label=apa.type_label(e.get("ENTRYTYPE") or "misc",
+                                          e.get("booktitle")),
                 author=apa._clean(e.get("author") or e.get("editor")),
                 year=apa._clean(e.get("year")),
                 title=apa._clean(e.get("title")),
@@ -872,11 +936,16 @@ class Workspace:
             rec._bib = e
             self.records[bid] = rec
             imported.append(bid)
+            # keep the DOI index current within this same import batch so two
+            # incoming entries that share a DOI don't both slip through.
+            if rec.doi:
+                self._doi_index[rec.doi.lower()] = bid
         if imported:
             self._build_doi_index()
             self._derive_authors()
+            self._derive_journals()
             self._save_index()
-        return imported
+        return imported, skipped_dois
 
     def rename_record(self, old_id: str, new_id: str) -> None:
         """Rename a record: move paired .bib/.md files and update my_works.
@@ -1103,6 +1172,9 @@ def _normalise_doi(doi: str | None) -> str:
 
 
 _ID_ALLOWED_RE = re.compile(r"[^A-Za-z0-9_-]+")
+
+# A journal nickname may contain only ASCII letters (upper/lower A-Z).
+_JOURNAL_NICKNAME_RE = re.compile(r"[A-Za-z]+")
 
 
 def _sanitise_id(text: str) -> str:

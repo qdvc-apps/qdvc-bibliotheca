@@ -304,9 +304,9 @@ _RENDERERS = {
 # A friendlier label for the "type" column / sidebar filtering.
 TYPE_LABELS = {
     "article": "Journal article",
-    "inproceedings": "Conference paper",
-    "conference": "Conference paper",
-    "proceedings": "Conference paper",
+    "inproceedings": "Proceedings",
+    "conference": "Proceedings",
+    "proceedings": "Proceedings",
     "book": "Book",
     "inbook": "Book chapter",
     "incollection": "Book chapter",
@@ -317,8 +317,18 @@ TYPE_LABELS = {
 }
 
 
-def type_label(entrytype: str) -> str:
-    return TYPE_LABELS.get((entrytype or "").lower(), "Other")
+def type_label(entrytype: str, booktitle: str | None = None) -> str:
+    """Map a BibTeX entry type to a human label.
+
+    An ``incollection`` whose ``booktitle`` begins with "Proceedings of" is
+    treated as "Proceedings" rather than "Book chapter", so conference material
+    filed as a collection chapter is grouped with the other proceedings.
+    """
+    et = (entrytype or "").lower()
+    if et == "incollection" and booktitle:
+        if _clean(booktitle).lower().startswith("proceedings of"):
+            return "Proceedings"
+    return TYPE_LABELS.get(et, "Other")
 
 
 # ---------------------------------------------------------------------------

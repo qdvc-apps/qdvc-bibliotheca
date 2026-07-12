@@ -16,10 +16,13 @@ Git or Syncthing.
   filter on the left (all works, by type, by full-text availability, by DOI
   status, by project, or by a starred author or journal — each filter showing
   the number of matching articles), scan the sortable table in the middle (with
-  a J-Flags column and a nickname-prefaced Outlet), and read the APA-7 reference
-  and your syntax-highlighted Markdown notes on the right. Sort by several keys
-  at once (e.g. Year descending, then Author ascending). Copy references as rich
-  text or plain text in one click.
+  a J-Flags column and a nickname-prefaced Outlet), and read the reference —
+  rendered with the built-in APA 7 style or a custom CSL style you pick from a
+  dropdown — alongside your syntax-highlighted Markdown notes on the right. Sort
+  by several keys at once (e.g. Year descending, then Author ascending). Copy
+  references as rich text or plain text in one click. Right-click a record (or
+  press the Menu key) for actions including "Go to journal", which jumps to the
+  Journals tab and highlights that journal.
 - **Authors** — a list of every author, derived automatically from your
   BibTeX. Star the ones you follow and they become quick filters in the
   Catalogue.
@@ -34,8 +37,9 @@ Git or Syncthing.
 - **Full-text** — attach a PDF or EPUB to any record and open it in your
   system viewer.
 - **Import** — paste BibTeX or load a `.bib` file; multi-entry files are split
-  and filed automatically, and you can allocate the new records to a work in the
-  same step.
+  and filed automatically, entries whose DOI already exists are skipped to
+  avoid duplicates, and you can allocate the new records to a work in the same
+  step.
 
 ## Requirements
 
@@ -43,6 +47,8 @@ Git or Syncthing.
 - PyGObject with GTK 3 (`python3-gi`, `gir1.2-gtk-3.0`)
 - PyYAML
 - `bibtexparser` (optional — a built-in fallback parser is used if it's absent)
+- `citeproc-py` (optional — enables rendering references with custom CSL
+  styles; without it the built-in APA renderer is the only option)
 
 ## Install & run
 
@@ -50,6 +56,7 @@ Git or Syncthing.
 # Debian/Ubuntu
 sudo apt install python3-gi gir1.2-gtk-3.0 python3-yaml
 pip install bibtexparser   # optional
+pip install citeproc-py    # optional (custom CSL citation styles)
 
 python3 qdvc-bibliotheca.py
 ```

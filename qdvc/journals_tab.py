@@ -140,6 +140,24 @@ class JournalsTab(Gtk.Box):
                                ", ".join(j.sorted_jflags()), j.journal_id,
                                len(j.record_ids)])
 
+    def reveal_journal(self, journal_id):
+        """Select the row for *journal_id* and scroll it into view. Clears any
+        active text/star filter first so the row is guaranteed visible. Used
+        when jumping here from the Catalogue's 'Go to journal' action."""
+        # Clear filters so the target row is present in the filtered view.
+        self.search.set_text("")
+        self.starred_only.set_active(False)
+        self.filter.refilter()
+        for row in self.filter:
+            if row[self.COL_ID] == journal_id:
+                self.view.get_selection().select_iter(row.iter)
+                path = row.path
+                self.view.scroll_to_cell(path, None, True, 0.5, 0.0)
+                self.view.set_cursor(path, None, False)
+                self.view.grab_focus()
+                return True
+        return False
+
     def _visible(self, model, it, _data):
         if self.starred_only.get_active() and not model[it][self.COL_STAR]:
             return False
@@ -213,11 +231,24 @@ class JournalsTab(Gtk.Box):
         if dlg.run() == Gtk.ResponseType.OK:
             nickname = entry.get_text().strip()
             dlg.destroy()
-            self.workspace.set_journal_nickname(jid, nickname)
+            try:
+                self.workspace.set_journal_nickname(jid, nickname)
+            except ValueError as exc:
+                self._warn(str(exc))
+                return
             self.reload()
             self.emit("journal-changed")
         else:
             dlg.destroy()
+
+    def _warn(self, message):
+        dlg = Gtk.MessageDialog(
+            transient_for=self.get_toplevel(), modal=True,
+            message_type=Gtk.MessageType.WARNING, buttons=Gtk.ButtonsType.OK,
+            text="Could not set nickname")
+        dlg.format_secondary_text(message)
+        dlg.run()
+        dlg.destroy()
 
     # ------------------------------------------------------------------
     # J-Flags
