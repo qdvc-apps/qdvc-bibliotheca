@@ -9,7 +9,7 @@ import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk  # noqa: E402
 
-from .catalogue_tab import SORT_LABELS
+from ..catalogue_sort import SORT_LABELS
 
 
 class SortDialog(Gtk.Dialog):

@@ -20,10 +20,15 @@ files plus a fast in-memory index. Consequences:
   represents the user's relationship with it.
 - Any external change to the files is recoverable by rescanning.
 
-**Separation of concerns.** `workspace.py` is pure model/IO logic with no GTK
-imports. All GTK code lives in the `*_tab.py`, `main_window.py`,
-`preferences.py`, and `myworks_editor.py` modules. This separation is what lets
-the model be unit-tested without a display (see §9).
+**Separation of concerns.** The top-level `qdvc/` package is **pure**,
+toolkit-independent logic with no GTK imports (`workspace.py`, `models.py`,
+`bibtex.py`, `markdown_io.py`, `naming.py`, `apa.py`, `csl.py`,
+`catalogue_sort.py`, `config.py`, `platform_utils.py`). **All GTK3 code lives
+in the `qdvc/gtk3/` sub-package**, where every module is prefixed `gtk3_`. This
+split is what lets the model be unit-tested without a display (see §9), and it
+keeps the pure layer ready for a second front-end: a future GTK4 port can live
+in a sibling `qdvc/gtk4/` package (mirroring the `gtk4_` prefix convention used
+in the related QDVC apps) without touching the pure modules.
 
 **Lazy where it counts.** Opening a large workspace must be fast, so a cached
 index holds only lightweight display fields. Full BibTeX parsing and notes
@@ -50,27 +55,51 @@ deliberately (see §8).
 ### 3.1 Source tree
 
 ```
-qdvc-bibliotheca.py        Launcher shim (adds nothing but a __main__ entry).
-qdvc/
+qdvc-bibliotheca.py        Launcher shim (imports qdvc.gtk3.gtk3_app:main).
+qdvc/                       PURE package — no GTK imports anywhere here.
     __init__.py            Version + app constants (APP_ID, APP_NAME, __version__).
-    app.py                 Gtk.Application subclass; sets prgname + icon.
     config.py              Config: load/save YAML at the XDG config location.
-    workspace.py           MODEL. No GTK. Records, MyWork, Author, Outlet,
-                           Workspace.
+    workspace.py           MODEL aggregate. The Workspace class + INDEX_*.
+                           Re-exports the names below for backward compat.
+    models.py              Record, MyWork, Author, Outlet dataclasses.
+    bibtex.py              BibTeX parsing (+ fallback) and multi-entry split.
+    markdown_io.py         Markdown / YAML-frontmatter read & write.
+    naming.py              id / slug / nickname / DOI helpers.
     apa.py                 BibTeX-entry -> APA 7 formatter (markup + plain).
     csl.py                 Optional CSL renderer (via citeproc-py) + fallback.
-    md_highlight.py        Regex Markdown highlighter for the notes buffer.
+    catalogue_sort.py      Pure sort-keys, count/label + J-Flag ordering helpers.
     platform_utils.py      Launch system apps (viewer, editor, file manager).
-    main_window.py         MainWindow (menubar/toolbar/notebook) + ImportDialog.
-    catalogue_tab.py       Three-pane Catalogue tab (the biggest UI module).
-    authors_tab.py         Authors tab (list + star toggles).
-    outlets_tab.py         Outlets tab (list + star + nickname + J-Flags).
-    doi_tab.py             DOI lookup tab.
-    preferences.py         Preferences dialog.
-    myworks_editor.py      Dialog to edit a "my work" (citations + published_as).
-    sort_dialog.py         Dialog to build a multi-key sort specification.
-    allocate_dialog.py     Dialog to allocate record(s) to one or more works.
+    gtk3/                  GTK3 front-end sub-package — all modules gtk3_*.
+        __init__.py        Package marker + porting note.
+        gtk3_app.py        Gtk.Application subclass; sets prgname + icon.
+        gtk3_main_window.py    MainWindow (menubar/toolbar/notebook) + ImportDialog.
+        gtk3_catalogue_tab.py  Three-pane Catalogue tab (the biggest UI module).
+        gtk3_authors_tab.py    Authors tab (list + star toggles).
+        gtk3_outlets_tab.py    Outlets tab (list + star + nickname + J-Flags).
+        gtk3_doi_tab.py        DOI lookup tab.
+        gtk3_preferences.py    Preferences dialog.
+        gtk3_myworks_editor.py Dialog to edit a "my work" (cites + published_as).
+        gtk3_sort_dialog.py    Dialog to build a multi-key sort specification.
+        gtk3_allocate_dialog.py Dialog to allocate record(s) to works.
+        gtk3_md_highlight.py   Regex Markdown highlighter for the notes buffer.
+        gtk3_widgets.py    Shared GTK3 helpers: icon menu item, Pango style
+                           enums, rich-text clipboard setter.
 ```
+
+**Pure vs. GTK3 rule of thumb.** If a module imports `gi`, it belongs in
+`qdvc/gtk3/` and is named `gtk3_*`. If it doesn't, it stays in the top-level
+`qdvc/` package. Intra-package imports follow from this: GTK3 modules reach
+pure modules with `from ..` (e.g. `from ..workspace import Workspace`,
+`from ..catalogue_sort import SORT_KEYS`) and reach their GTK3 siblings with
+`from .gtk3_x import …`.
+
+**Backward-compatible re-exports.** `workspace.py` was split into `models.py`,
+`bibtex.py`, `markdown_io.py`, and `naming.py`, but it still imports and
+re-exports every moved name — including the old underscore-prefixed private
+aliases (`_sanitise_id`, `_id_suffix`, `_sanitise_stem`, `_normalise_doi`,
+`_split_bib_entries`, `_parse_bib_fallback`) — so existing imports such as
+`from qdvc.workspace import Workspace, slugify_outlet, Record` keep working
+unchanged.
 
 ### 3.2 Workspace on disk
 
@@ -222,14 +251,25 @@ key is a `{workspace_root_path: style_id}` map persisting the chosen citation
 style per workspace (`style_id` is the `APA_STYLE_ID` sentinel or a CSL
 filename); read via `MainWindow._saved_citation_style` and written by
 `_on_citation_style_chosen`. When you add a preference, add it in
-`preferences.py` (widget + `apply()`) and read it where used; no schema
+`gtk3/gtk3_preferences.py` (widget + `apply()`) and read it where used; no schema
 migration is needed because `Config.get` takes a default.
 
 ---
 
-## 5. The model: `workspace.py`
+## 5. The model (pure, no GTK)
 
-No GTK. Three dataclasses plus the `Workspace` aggregate.
+The model is spread across small pure modules, all re-exported from
+`workspace.py` for backward compatibility:
+
+- **`models.py`** — the four dataclasses (`Record`, `MyWork`, `Author`,
+  `Outlet`); §5.1–5.3b.
+- **`bibtex.py`** — `parse_bibtex`, `parse_bib_fallback`, `split_bib_entries`.
+- **`markdown_io.py`** — `parse_markdown`, `write_markdown`.
+- **`naming.py`** — `normalise_doi`, `sanitise_id`, `id_suffix`,
+  `sanitise_stem`, `slugify_outlet`, `make_author_id` (§5.8). Underscore-named
+  aliases (`_sanitise_id` etc.) are re-exported from `workspace.py`.
+- **`workspace.py`** — the `Workspace` aggregate itself plus `INDEX_FILENAME`
+  / `INDEX_VERSION`.
 
 ### 5.1 `Record`
 
@@ -332,16 +372,19 @@ resolved against `storage_root` before the existence check. When you add a
 check, add its key here **and** a `section(...)` line in
 `MainWindow._format_report`.
 
-### 5.8 Module helpers
+### 5.8 Module helpers (`naming.py`)
 
-`make_author_id(surname, given)` → `SURNAME_GivenNames` (surname uppercased,
-given-names title-cased, non-alphanumerics stripped). `_sanitise_id` for safe
-file stems. `_id_suffix(id)` returns the text after the last underscore (the
-`AuthorSurnamesYear_suffix` convention). `_normalise_doi` strips a `doi.org/`
-prefix. `slugify_outlet(name)` → lowercase hyphen-joined slug (the stable
-`outlet_id`, e.g. "Journal of Bibliotheca" → `journal-of-bibliotheca`).
-`_sanitise_stem` makes a safe file stem **preserving case** (used for nickname
-filenames like `JBIB.yml`).
+These live in `naming.py` and are re-exported from `workspace.py` (both under
+their public names and the legacy underscore aliases). `make_author_id(surname,
+given)` → `SURNAME_GivenNames` (surname uppercased, given-names title-cased,
+non-alphanumerics stripped). `sanitise_id` (`_sanitise_id`) for safe file
+stems. `id_suffix(id)` (`_id_suffix`) returns the text after the last
+underscore (the `AuthorSurnamesYear_suffix` convention). `normalise_doi`
+(`_normalise_doi`) strips a `doi.org/` prefix. `slugify_outlet(name)` →
+lowercase hyphen-joined slug (the stable `outlet_id`, e.g. "Journal of
+Bibliotheca" → `journal-of-bibliotheca`). `sanitise_stem` (`_sanitise_stem`)
+makes a safe file stem **preserving case** (used for nickname filenames like
+`JBIB.yml`).
 
 ---
 
@@ -411,13 +454,13 @@ HTML-clipboard path in the Catalogue (see §8.2).
 
 ### 8.1 Application & window bootstrap
 
-`app.py`: `Gtk.Application` (id `org.qdvc.Bibliotheca`, `HANDLES_OPEN`).
+`gtk3/gtk3_app.py`: `Gtk.Application` (id `org.qdvc.Bibliotheca`, `HANDLES_OPEN`).
 `GLib.set_prgname("qdvc-bibliotheca")` runs at import so the X11 `WM_CLASS`
 matches the `.desktop` `StartupWMClass` (needed for the MATE panel icon).
 `do_startup` sets the default icon name; `do_activate` builds the single
 `MainWindow`; `do_open` routes a folder argument to `_open_path`.
 
-`main_window.py` builds a `Gtk.Box` containing menubar, toolbar, a
+`gtk3/gtk3_main_window.py` builds a `Gtk.Box` containing menubar, toolbar, a
 `Gtk.Notebook` (Catalogue / Authors / Outlets / DOI Lookup, in that order —
 index 0/1/2/3, which the Alt+1/2/3/4 accelerators and
 `_on_goto_record`/`_on_show_author_works`/`_on_show_outlet_works` depend on),
@@ -439,7 +482,7 @@ actions moved to the Catalogue's row right-click menu (see §8.2), and F2
 (rename) is bound at the window level via `accel_group.connect` →
 `_accel_rename`, which fires only on the Catalogue tab with a record selected.
 
-### 8.2 Catalogue tab (`catalogue_tab.py`) — the big one
+### 8.2 Catalogue tab (`gtk3/gtk3_catalogue_tab.py`) — the big one
 
 Three panes in nested `Gtk.Paned`:
 
@@ -533,7 +576,7 @@ filter changes because every populate path runs through `_populate_master`
 place. The available keys and their comparison functions live in the
 module-level `SORT_KEYS` dict; `SORT_LABELS` gives their display order and human
 names. Year sorts numerically via `_year_key` (so 2009 < 2025). `SortDialog`
-(in `sort_dialog.py`) is the UI: an ordered, reorderable list the user builds
+(in `gtk3/gtk3_sort_dialog.py`) is the UI: an ordered, reorderable list the user builds
 with an "add key" combo, up/down/toggle-direction/remove buttons; it returns
 the spec via `get_spec()`. The View → Sort menu item and the Sort toolbar
 button (both workspace-sensitive) invoke it from `MainWindow._on_sort`, which
@@ -545,7 +588,7 @@ window close. Honours the `autosave` preference. Suppressed during programmatic
 buffer loads via `_suppress_notes_save`.
 
 **Notes syntax highlighting**: the notes `TextBuffer` is wrapped by a
-`MarkdownHighlighter` (`md_highlight.py`, ported from the QDVC Markdown Notebook
+`MarkdownHighlighter` (`gtk3/gtk3_md_highlight.py`, ported from the QDVC Markdown Notebook
 project). It applies colour/weight/style tags — no font-size variation — so the
 notes read as highlighted Markdown while staying plain, editable text.
 `highlight()` runs after a record's notes load (in `_show_detail`, where the
@@ -568,7 +611,7 @@ Public methods the main window calls: `set_workspace`, `set_fulltext_root`,
 `reveal_record`, `current_record`, `flush_notes`, `set_sort_spec`,
 `get_sort_spec`.
 
-### 8.3 Authors tab (`authors_tab.py`)
+### 8.3 Authors tab (`gtk3/gtk3_authors_tab.py`)
 
 A `ListStore(bool, str, str, int)` = (starred, display_name, author_id,
 work_count) behind a filter (text + "starred only"). The star column is a
@@ -578,7 +621,7 @@ conversion if you touch it. Emits `star-changed(author_id, bool)` and
 `show-author-works(author_id)`. The main window relays these to
 `catalogue.refresh_starred_authors()` and `catalogue.show_author_works()`.
 
-### 8.3b Outlets tab (`outlets_tab.py`)
+### 8.3b Outlets tab (`gtk3/gtk3_outlets_tab.py`)
 
 A `ListStore(bool, str, str, str, str, int)` = (starred, name, nickname,
 jflags_joined, outlet_id, record_count) behind a filter (text + "starred
@@ -600,7 +643,7 @@ columns re-render. `set_jflag_presets` is pushed from
 scrolls the matching row into view — used by the Catalogue's "Go to outlet"
 (`MainWindow._on_goto_outlet` switches to this tab first).
 
-### 8.4 DOI tab (`doi_tab.py`)
+### 8.4 DOI tab (`gtk3/gtk3_doi_tab.py`)
 
 Entry + Lookup button + status label. On match, emits `goto-record(id)` which
 the main window routes to the Catalogue (`reveal_record`). On miss, shows
@@ -608,7 +651,7 @@ the main window routes to the Catalogue (`reveal_record`). On miss, shows
 
 ### 8.5 Dialogs
 
-- `ImportDialog` (in `main_window.py`) — paste box + "Choose file…" that loads
+- `ImportDialog` (in `gtk3/gtk3_main_window.py`) — paste box + "Choose file…" that loads
   a `.bib` into the same box; import always uses the box text via
   `import_bib_text`. Carries an "Allocate imported records to:" dropdown
   (`allocate_work_key` → work key or None) listing every work plus "(none)".
@@ -617,7 +660,7 @@ the main window routes to the Catalogue (`reveal_record`). On miss, shows
   work is pre-selected. After a successful import, if a work was chosen the
   imported ids are allocated to it and the Catalogue navigates to that work's
   view (`catalogue.show_work`).
-- `AllocateDialog` (`allocate_dialog.py`) — a checklist of existing works
+- `AllocateDialog` (`gtk3/gtk3_allocate_dialog.py`) — a checklist of existing works
   (pre-ticked where every selected record is already cited) plus a "new work"
   entry. `apply()` optionally creates the new work, then calls
   `Workspace.allocate_to_work` for each ticked work and the new one; returns the
@@ -637,8 +680,9 @@ the main window routes to the Catalogue (`reveal_record`). On miss, shows
   priority map into the Catalogue and the presets into the Outlets tab, and
   calls `catalogue.refresh_csl_styles()` + `set_citation_style(...)` in case a
   CSL file was added or removed.
-- `MyWorkEditor` — two-list citation picker + name + `published_as` combo;
-  keeps its cited list alphabetical and inserts additions at their sorted slot.
+- `MyWorkEditor` (`gtk3/gtk3_myworks_editor.py`) — two-list citation picker +
+  name + `published_as` combo; keeps its cited list alphabetical and inserts
+  additions at their sorted slot.
 
 ### 8.6 `platform_utils.py`
 
@@ -654,24 +698,27 @@ the main window routes to the Catalogue (`reveal_record`). On miss, shows
 There is no bundled GTK in many CI/sandbox environments, so two techniques are
 used:
 
-1. **Model tests** run directly — `workspace.py` and `apa.py` import no GTK, so
-   you can build a temp workspace on disk and assert on `Workspace` behaviour
-   (author derivation, import, rename, validate, full-text relative paths).
+1. **Model tests** run directly — the entire pure layer (`workspace.py`,
+   `models.py`, `bibtex.py`, `markdown_io.py`, `naming.py`, `apa.py`, `csl.py`,
+   `catalogue_sort.py`) imports no GTK, so you can build a temp workspace on
+   disk and assert on `Workspace` behaviour (author/outlet derivation, import,
+   rename, validate, full-text relative paths) without a display.
 2. **Import smoke test** — a permissive fake `gi` package (a stub that returns a
-   catch-all object for any attribute) lets every GTK module be *imported* so
-   class bodies, `__gsignals__` definitions, and top-level code are exercised.
-   This catches typos, bad imports, and signature errors that `py_compile`
-   misses. Note the stub cannot evaluate real enum values, which is why Pango
-   style ints are computed through guarded helpers rather than at class scope.
+   catch-all object for any attribute) lets every GTK module under `qdvc/gtk3/`
+   be *imported* so class bodies, `__gsignals__` definitions, and top-level code
+   are exercised. This catches typos, bad imports, and signature errors that
+   `py_compile` misses. Note the stub cannot evaluate real enum values, which is
+   why Pango style ints are computed through guarded helpers (in
+   `gtk3/gtk3_widgets.py`) rather than at class scope.
 
 Before shipping a change, at minimum:
 
 ```sh
-python3 -m py_compile qdvc/*.py qdvc-bibliotheca.py
-# then the stub-import of every qdvc.* module
+python3 -m py_compile qdvc/*.py qdvc/gtk3/*.py qdvc-bibliotheca.py
+# then the stub-import of every qdvc.* and qdvc.gtk3.* module
 ```
 
-and cross-check that every `self.<tab>.<method>` call in `main_window.py` has a
+and cross-check that every `self.<tab>.<method>` call in `gtk3/gtk3_main_window.py` has a
 matching definition, and every `.connect("signal")` has a declared
 `__gsignals__` entry.
 
@@ -696,17 +743,18 @@ placeholder, not a crash).
 - **Add a validation check** → add the key + logic in `Workspace.validate`, and
   a `section(...)` line in `MainWindow._format_report`.
 - **Add a sortable field** → add an entry to `SORT_KEYS` (id → key function)
-  and `SORT_LABELS` (id → label, in display order) in `catalogue_tab.py`. The
-  sort dialog and the sort engine pick it up automatically.
+  and `SORT_LABELS` (id → label, in display order) in the pure
+  `catalogue_sort.py`. The sort dialog (`gtk3/gtk3_sort_dialog.py`) and the sort
+  engine in `gtk3/gtk3_catalogue_tab.py` pick it up automatically.
 - **Add a preference** → widget + `apply()` in the relevant tab of
-  `preferences.py` (General / J-Flags / CSL); read via
+  `gtk3/gtk3_preferences.py` (General / J-Flags / CSL); read via
   `config.get(key, default)`; if it affects widgets live, push it in
   `_apply_prefs_to_widgets`.
 - **Tweak outlets / J-Flags / nicknames** → the `Outlet` dataclass and
   `_derive_outlets`/`set_outlet_*` in `workspace.py` (model, including
   `OUTLET_TYPES` for which record types count); the display in
   `catalogue_tab._outlet_markup`/`_jflags_display`/`_order_jflags`; the editors
-  in `outlets_tab.py`; the presets in `preferences.py` + `MainWindow`'s
+  in `gtk3/gtk3_outlets_tab.py`; the presets in `gtk3/gtk3_preferences.py` + `MainWindow`'s
   `_jflag_presets`/`_jflag_priority_map`.
 - **Tweak CSL rendering** → `csl.py` (`entry_to_csl_json` for the BibTeX→CSL-JSON
   mapping, `_html_to_pango`/`_html_to_plain` for output); the dropdown +
@@ -718,8 +766,21 @@ placeholder, not a crash).
 - **Change the cached record schema** → update `Record`, `_scan`, `_load_index`,
   `_save_index`, and **bump `INDEX_VERSION`**.
 - **Add a menu/toolbar action** → the relevant `_*_menu`/`_build_toolbar`
-  builder in `main_window.py`; wire sensitivity into
+  builder in `gtk3/gtk3_main_window.py`; wire sensitivity into
   `_update_actions_sensitivity`.
+- **Add a new module** → if it imports `gi` it goes in `qdvc/gtk3/` with a
+  `gtk3_` prefix; otherwise it stays in the pure top-level `qdvc/` package.
+  GTK3 modules import pure ones with `from ..` and siblings with
+  `from .gtk3_x`.
+- **Extract pure logic from a GTK module** → move the toolkit-independent
+  function/constant into a pure module (e.g. a new `*_sort.py`-style helper or
+  `naming.py`), import it back with `from ..`, and — if callers used a private
+  name — alias on import (`from ..x import y as _y`) so the GTK class body is
+  unchanged. This is exactly how `catalogue_sort.py`, `naming.py`, and the
+  `models`/`bibtex`/`markdown_io` split were done.
+- **Start a GTK4 port** → create a sibling `qdvc/gtk4/` package with `gtk4_`
+  modules that reuse the entire pure layer unchanged; add a launcher entry
+  pointing at `qdvc.gtk4.gtk4_app:main`. No pure module should need edits.
 
 ---
 
@@ -727,11 +788,11 @@ placeholder, not a crash).
 
 The app uses a **standard freedesktop themed icon** — `accessories-dictionary`
 — present on a typical GNOME/MATE install, so no icon file is bundled or needs
-installing. `app.py` defines `ICON_NAME = "accessories-dictionary"`;
+installing. `gtk3/gtk3_app.py` defines `ICON_NAME = "accessories-dictionary"`;
 `do_startup` calls `Gtk.Window.set_default_icon_name(ICON_NAME)` and
 `MainWindow.__init__` calls `self.set_icon_name("accessories-dictionary")`, so
 the icon shows even before any `.desktop` matching.
-`GLib.set_prgname("qdvc-bibliotheca")` (run at import in `app.py`) fixes the
+`GLib.set_prgname("qdvc-bibliotheca")` (run at import in `gtk3/gtk3_app.py`) fixes the
 X11 `WM_CLASS` so the MATE panel can associate the running window with the
 launcher.
 
@@ -759,7 +820,7 @@ Keywords=bibliography;references;bibtex;citations;research;
 - `Icon=accessories-dictionary` is a standard themed icon, so the launcher/menu
   entry resolves it without any extra install step. To use custom artwork
   instead, point `Icon=` at an absolute path to a `.png`/`.svg` and change
-  `ICON_NAME` in `app.py` (and the `set_icon_name` call in `main_window.py`) to
+  `ICON_NAME` in `gtk3/gtk3_app.py` (and the `set_icon_name` call in `gtk3/gtk3_main_window.py`) to
   match.
 - `Exec` must be an absolute path; `Path` must be the directory containing both
   `qdvc-bibliotheca.py` and the `qdvc/` package. `%U` lets you drop a workspace

@@ -7,9 +7,9 @@ import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, Gio, GLib  # noqa: E402
 
-from . import APP_ID
-from .config import Config
-from .main_window import MainWindow
+from .. import APP_ID
+from ..config import Config
+from .gtk3_main_window import MainWindow
 
 # The standard freedesktop themed icon this app uses. Present on a typical
 # GNOME/MATE install, so no icon file needs to be bundled or installed.

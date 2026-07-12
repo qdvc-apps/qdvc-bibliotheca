@@ -11,336 +11,52 @@ We build a lightweight index (bibliotheca_id -> paths + a few display fields)
 and cache it as JSON at (root)/.qdvc-index.json so re-opening a large workspace
 is fast. Full BibTeX parsing and Markdown reading are done lazily, per record,
 only when a record is selected.
+
+This module keeps the `Workspace` class itself. The pure building blocks it is
+built from were split out into focused modules and are re-exported here so
+existing imports (e.g. `from .workspace import slugify_outlet` / `Record`)
+keep working unchanged:
+
+  * bibtex.py       BibTeX parsing + multi-entry splitting.
+  * markdown_io.py  Markdown/YAML-frontmatter read & write.
+  * naming.py       id / slug / nickname / DOI helpers.
+  * models.py       Record, MyWork, Author, Outlet dataclasses.
 """
 
 import json
 import os
-import re
-from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
 
 from . import apa
+from .bibtex import parse_bibtex, parse_bib_fallback, split_bib_entries
+from .markdown_io import parse_markdown, write_markdown
+from .models import Record, MyWork, Author, Outlet
+from .naming import (
+    normalise_doi,
+    sanitise_id,
+    id_suffix,
+    sanitise_stem,
+    slugify_outlet,
+    make_author_id,
+    _OUTLET_NICKNAME_RE,
+)
+
+# --- backward-compatible aliases ------------------------------------------
+# The helpers below used to live in this module under underscore-prefixed
+# names and are referenced that way inside `Workspace` (and by some callers /
+# tests). Keep the old names pointing at the new public functions so nothing
+# downstream has to change.
+_normalise_doi = normalise_doi
+_sanitise_id = sanitise_id
+_id_suffix = id_suffix
+_sanitise_stem = sanitise_stem
+_parse_bib_fallback = parse_bib_fallback
+_split_bib_entries = split_bib_entries
 
 INDEX_FILENAME = ".qdvc-index.json"
 INDEX_VERSION = 4
-
-_BIB_ENTRY_RE = re.compile(r"@(\w+)\s*\{", re.IGNORECASE)
-_FIELD_RE = re.compile(r"(\w+)\s*=\s*", re.IGNORECASE)
-
-
-# ---------------------------------------------------------------------------
-# BibTeX parsing (uses bibtexparser if present, else a small fallback)
-# ---------------------------------------------------------------------------
-
-def _parse_bib_fallback(text: str) -> dict:
-    """Minimal single-entry BibTeX parser used when bibtexparser is absent.
-
-    Handles brace- and quote-delimited values and nested braces. Good enough
-    for one-entry .bib files, which is the workspace convention.
-    """
-    m = _BIB_ENTRY_RE.search(text)
-    if not m:
-        return {}
-    entry = {"ENTRYTYPE": m.group(1).lower()}
-    i = m.end()
-    # citation key up to first comma
-    key_end = text.find(",", i)
-    if key_end == -1:
-        return entry
-    entry["ID"] = text[i:key_end].strip()
-    i = key_end + 1
-    n = len(text)
-    while i < n:
-        fm = _FIELD_RE.search(text, i)
-        if not fm:
-            break
-        fname = fm.group(1).lower()
-        j = fm.end()
-        while j < n and text[j] in " \t\r\n":
-            j += 1
-        if j >= n:
-            break
-        ch = text[j]
-        if ch == "{":
-            depth = 0
-            start = j + 1
-            k = j
-            while k < n:
-                if text[k] == "{":
-                    depth += 1
-                elif text[k] == "}":
-                    depth -= 1
-                    if depth == 0:
-                        break
-                k += 1
-            value = text[start:k]
-            i = k + 1
-        elif ch == '"':
-            start = j + 1
-            k = start
-            while k < n and text[k] != '"':
-                k += 1
-            value = text[start:k]
-            i = k + 1
-        else:  # bare value (number, etc.)
-            k = j
-            while k < n and text[k] not in ",}\n":
-                k += 1
-            value = text[j:k].strip()
-            i = k
-        entry[fname] = value.strip()
-        # advance past a trailing comma
-        while i < n and text[i] in " \t\r\n":
-            i += 1
-        if i < n and text[i] == ",":
-            i += 1
-        elif i < n and text[i] == "}":
-            break
-    return entry
-
-
-def parse_bibtex(path: Path) -> dict:
-    """Parse a single-entry .bib file into a normalised dict."""
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return {}
-    try:
-        import bibtexparser  # type: ignore
-        from bibtexparser.bparser import BibTexParser  # type: ignore
-        parser = BibTexParser(common_strings=True)
-        parser.ignore_nonstandard_types = False
-        db = bibtexparser.loads(text, parser=parser)
-        if db.entries:
-            e = dict(db.entries[0])
-            # normalise key casing used elsewhere
-            e.setdefault("ENTRYTYPE", e.get("entrytype", "misc"))
-            return e
-    except Exception:
-        pass
-    return _parse_bib_fallback(text)
-
-
-# ---------------------------------------------------------------------------
-# Markdown + YAML frontmatter
-# ---------------------------------------------------------------------------
-
-_FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", re.DOTALL)
-
-
-def parse_markdown(path: Path) -> tuple[dict, str]:
-    """Return (frontmatter_dict, body_markdown)."""
-    if not path.exists():
-        return {}, ""
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return {}, ""
-    m = _FRONTMATTER_RE.match(text)
-    if not m:
-        return {}, text
-    try:
-        fm = yaml.safe_load(m.group(1)) or {}
-    except yaml.YAMLError:
-        fm = {}
-    if not isinstance(fm, dict):
-        fm = {}
-    return fm, m.group(2)
-
-
-def write_markdown(path: Path, frontmatter: dict, body: str) -> None:
-    """Write frontmatter + body atomically."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fm_text = yaml.safe_dump(frontmatter or {}, sort_keys=True,
-                             allow_unicode=True).strip()
-    content = f"---\n{fm_text}\n---\n{body}"
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(content, encoding="utf-8")
-    os.replace(tmp, path)
-
-
-# ---------------------------------------------------------------------------
-# Records
-# ---------------------------------------------------------------------------
-
-@dataclass
-class Record:
-    bibliotheca_id: str
-    bib_path: str
-    md_path: str | None = None
-    # cached-index display fields:
-    entrytype: str = "misc"
-    type_label: str = "Other"
-    author: str = ""
-    year: str = ""
-    title: str = ""
-    journal: str = ""
-    doi: str = ""
-    # full-text presence, cached in the index (paths live in the .md file):
-    has_pdf: bool = False
-    has_epub: bool = False
-    # lazily populated:
-    _bib: dict | None = field(default=None, repr=False)
-
-    def bib(self) -> dict:
-        if self._bib is None:
-            self._bib = parse_bibtex(Path(self.bib_path))
-        return self._bib
-
-    def apa_markup(self) -> str:
-        return apa.format_apa_markup(self.bib())
-
-    def apa_plain(self) -> str:
-        return apa.format_apa_plain(self.bib())
-
-    @property
-    def outlet(self) -> str:
-        """Display value for the 'Outlet' column: the journal for journal
-        articles, the book/proceedings title for chapters and proceedings, an
-        em dash otherwise."""
-        if self.type_label in ("Journal article", "Book chapter",
-                               "Proceedings"):
-            return self.journal or "\u2014"
-        return "\u2014"
-
-    def read_notes(self) -> tuple[dict, str]:
-        if self.md_path:
-            return parse_markdown(Path(self.md_path))
-        return {}, ""
-
-
-@dataclass
-class MyWork:
-    name: str
-    path: str
-    cites: list[str] = field(default_factory=list)
-    published_as: str | None = None
-
-    def sorted_cites(self) -> list[str]:
-        """Cited Bibliotheca IDs, de-duplicated and alphabetically ordered
-        (case-insensitive)."""
-        seen = set()
-        unique = []
-        for c in self.cites:
-            if c not in seen:
-                seen.add(c)
-                unique.append(c)
-        return sorted(unique, key=str.lower)
-
-    def to_yaml_dict(self) -> dict:
-        # Order matters: `name` first, then `cites`, then optional extras.
-        # Python dicts preserve insertion order and we dump with
-        # sort_keys=False so this ordering is what lands on disk.
-        data: dict = {"name": self.name, "cites": self.sorted_cites()}
-        if self.published_as:
-            data["published_as"] = self.published_as
-        return data
-
-    def save(self) -> None:
-        # keep the in-memory list canonicalised too, so callers that read
-        # `cites` after a save see the same order that was written
-        self.cites = self.sorted_cites()
-        p = Path(self.path)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        text = yaml.safe_dump(self.to_yaml_dict(), sort_keys=False,
-                              allow_unicode=True)
-        tmp = p.with_suffix(p.suffix + ".tmp")
-        tmp.write_text(text, encoding="utf-8")
-        os.replace(tmp, p)
-
-
-@dataclass
-class Author:
-    author_id: str            # SURNAME_GivenNames
-    surname: str
-    given_names: str
-    starred: bool = False
-    path: str = ""            # authors/<author_id>.yml
-    # populated at load time, not persisted:
-    record_ids: list[str] = field(default_factory=list)
-
-    @property
-    def display_name(self) -> str:
-        if self.given_names:
-            return f"{self.surname}, {self.given_names}"
-        return self.surname
-
-    def to_yaml_dict(self) -> dict:
-        return {
-            "id": self.author_id,
-            "surname": self.surname,
-            "given_names": self.given_names,
-            "starred": bool(self.starred),
-        }
-
-    def save(self) -> None:
-        p = Path(self.path)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        text = yaml.safe_dump(self.to_yaml_dict(), sort_keys=True,
-                              allow_unicode=True)
-        tmp = p.with_suffix(p.suffix + ".tmp")
-        tmp.write_text(text, encoding="utf-8")
-        os.replace(tmp, p)
-
-
-@dataclass
-class Outlet:
-    """A publication outlet (journal or proceedings) derived from the outlet
-    field of journal-article and proceedings records.
-
-    `outlet_id` is a stable in-memory key (the slug of the full name); it does
-    not change when a nickname is set. The on-disk file stem, however, is the
-    nickname when one is set, else the slug (see `Workspace.outlet_path_for`).
-    Only `starred`, `nickname`, and `jflags` are user-editable; `name` is the
-    verbatim outlet title as it appears in the BibTeX.
-    """
-
-    outlet_id: str            # slug of the full name (stable key)
-    name: str                 # full outlet title, verbatim
-    nickname: str = ""        # optional short label, e.g. "JBIB"
-    starred: bool = False
-    jflags: list[str] = field(default_factory=list)
-    path: str = ""            # outlets/<nickname-or-slug>.yml
-    # populated at load time, not persisted:
-    record_ids: list[str] = field(default_factory=list)
-
-    @property
-    def display_name(self) -> str:
-        return self.name
-
-    def sorted_jflags(self) -> list[str]:
-        """J-Flags de-duplicated and stored in alphabetical order (the on-disk
-        canonical form). Display ordering by priority is a UI concern handled
-        elsewhere."""
-        seen = set()
-        unique = []
-        for f in self.jflags:
-            f = str(f).strip()
-            if f and f not in seen:
-                seen.add(f)
-                unique.append(f)
-        return sorted(unique, key=str.lower)
-
-    def to_yaml_dict(self) -> dict:
-        data: dict = {"name": self.name}
-        if self.nickname:
-            data["nickname"] = self.nickname
-        data["starred"] = bool(self.starred)
-        data["jflags"] = self.sorted_jflags()
-        return data
-
-    def save(self) -> None:
-        # keep the in-memory list canonicalised too
-        self.jflags = self.sorted_jflags()
-        p = Path(self.path)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        text = yaml.safe_dump(self.to_yaml_dict(), sort_keys=False,
-                              allow_unicode=True)
-        tmp = p.with_suffix(p.suffix + ".tmp")
-        tmp.write_text(text, encoding="utf-8")
-        os.replace(tmp, p)
 
 
 class Workspace:
@@ -1195,122 +911,3 @@ class Workspace:
                     report["suffix_no_nick"].append((bid, suffix))
 
         return report
-
-
-def _normalise_doi(doi: str | None) -> str:
-    if not doi:
-        return ""
-    doi = doi.strip()
-    doi = re.sub(r"^https?://(dx\.)?doi\.org/", "", doi, flags=re.IGNORECASE)
-    return doi
-
-
-_ID_ALLOWED_RE = re.compile(r"[^A-Za-z0-9_-]+")
-
-# An outlet nickname may contain only ASCII letters (upper/lower A-Z).
-_OUTLET_NICKNAME_RE = re.compile(r"[A-Za-z]+")
-
-
-def _sanitise_id(text: str) -> str:
-    """Turn an arbitrary string into a safe file-stem / bibliotheca_id."""
-    text = (text or "").strip()
-    # collapse whitespace to underscores, strip disallowed characters
-    text = re.sub(r"\s+", "_", text)
-    text = _ID_ALLOWED_RE.sub("", text)
-    return text.strip("_-")
-
-
-def _id_suffix(bibliotheca_id: str) -> str:
-    """Return the suffix of a bibliotheca_id, i.e. the text after the last
-    underscore (the convention is ``AuthorSurnamesYear_suffix``). Returns '' if
-    there is no underscore or nothing follows it."""
-    bid = bibliotheca_id or ""
-    if "_" not in bid:
-        return ""
-    return bid.rsplit("_", 1)[1].strip()
-
-
-def _sanitise_stem(text: str) -> str:
-    """Turn arbitrary text into a safe file stem, preserving case.
-
-    Used for outlet nickname filenames ("JBIB" -> "JBIB.yml"). Spaces become
-    hyphens; characters outside [A-Za-z0-9_-] are dropped.
-    """
-    text = (text or "").strip()
-    text = re.sub(r"\s+", "-", text)
-    text = _ID_ALLOWED_RE.sub("", text)
-    return text.strip("-_")
-
-
-def slugify_outlet(name: str) -> str:
-    """Slugify an outlet name to a stable, lowercase, hyphen-joined id.
-
-    "Journal of Bibliotheca" -> "journal-of-bibliotheca"
-
-    Returns '' if nothing usable remains.
-    """
-    text = (name or "").strip().lower()
-    text = re.sub(r"[^a-z0-9]+", "-", text)
-    return text.strip("-")
-
-
-def make_author_id(surname: str, given_names: str) -> str:
-    """Build a stable author id of the form SURNAME_GivenNames.
-
-    Surname is upper-cased; given names keep their case. Non-alphanumeric
-    characters (spaces, dots, hyphens inside names) are removed so the id is a
-    safe filename. Returns '' if there is no surname.
-    """
-    surname = (surname or "").strip()
-    given_names = (given_names or "").strip()
-    if not surname:
-        return ""
-    sur = re.sub(r"[^A-Za-z0-9]+", "", surname).upper()
-    giv = re.sub(r"[^A-Za-z0-9]+", "", given_names.title())
-    if not sur:
-        return ""
-    return f"{sur}_{giv}" if giv else sur
-
-
-def _split_bib_entries(text: str) -> list[tuple[str, str]]:
-    """Split a multi-entry .bib string into (entry_text, citation_key) pairs.
-
-    Uses brace balancing so entry bodies containing nested braces are kept
-    intact. Non-entry content (comments, @string, @preamble) is skipped.
-    """
-    entries: list[tuple[str, str]] = []
-    n = len(text)
-    i = 0
-    while i < n:
-        at = text.find("@", i)
-        if at == -1:
-            break
-        m = _BIB_ENTRY_RE.match(text, at)
-        if not m:
-            i = at + 1
-            continue
-        etype = m.group(1).lower()
-        brace_open = m.end() - 1  # position of '{'
-        # balance braces to find the end of this entry
-        depth = 0
-        j = brace_open
-        while j < n:
-            if text[j] == "{":
-                depth += 1
-            elif text[j] == "}":
-                depth -= 1
-                if depth == 0:
-                    break
-            j += 1
-        entry_text = text[at:j + 1]
-        i = j + 1
-        if etype in ("string", "preamble", "comment"):
-            continue
-        # citation key: between '{' and first comma
-        comma = entry_text.find(",")
-        brace = entry_text.find("{")
-        if comma == -1 or brace == -1:
-            continue
-        key = entry_text[brace + 1:comma].strip()
-        entries.append((entry_text, key))
-    return entries

@@ -187,7 +187,7 @@ class PreferencesDialog(Gtk.Dialog):
         status = Gtk.Label(xalign=0)
         status.get_style_context().add_class("dim-label")
         try:
-            from . import csl as _csl
+            from .. import csl as _csl
             backend_ok = _csl.csl_available()
         except Exception:  # noqa: BLE001
             backend_ok = False

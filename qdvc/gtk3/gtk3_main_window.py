@@ -7,14 +7,14 @@ import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, Gdk, Gio  # noqa: E402
 
-from . import APP_NAME, __version__
-from .workspace import Workspace
-from .catalogue_tab import CatalogueTab
-from .doi_tab import DoiLookupTab
-from .authors_tab import AuthorsTab
-from .outlets_tab import OutletsTab
-from .preferences import PreferencesDialog
-from .platform_utils import (open_with_default_app, open_with_text_editor,
+from .. import APP_NAME, __version__
+from ..workspace import Workspace
+from .gtk3_catalogue_tab import CatalogueTab
+from .gtk3_doi_tab import DoiLookupTab
+from .gtk3_authors_tab import AuthorsTab
+from .gtk3_outlets_tab import OutletsTab
+from .gtk3_preferences import PreferencesDialog
+from ..platform_utils import (open_with_default_app, open_with_text_editor,
                              reveal_in_file_manager)
 
 
@@ -566,7 +566,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self._set_status("View refreshed.")
 
     def _on_sort(self, _item):
-        from .sort_dialog import SortDialog
+        from .gtk3_sort_dialog import SortDialog
         dlg = SortDialog(self, self.catalogue.get_sort_spec())
         resp = dlg.run()
         if resp == Gtk.ResponseType.OK:
@@ -584,7 +584,7 @@ class MainWindow(Gtk.ApplicationWindow):
     def _describe_sort(spec):
         if not spec:
             return "Sort cleared (default order)."
-        from .catalogue_tab import SORT_LABELS
+        from ..catalogue_sort import SORT_LABELS
         labels = dict(SORT_LABELS)
         up, down = "\u2191", "\u2193"
         parts = [f"{labels.get(fid, fid)} {up if asc else down}"
@@ -685,7 +685,7 @@ class MainWindow(Gtk.ApplicationWindow):
         """Open the allocation dialog for one or more record ids."""
         if not self.workspace or not bibliotheca_ids:
             return
-        from .allocate_dialog import AllocateDialog
+        from .gtk3_allocate_dialog import AllocateDialog
         dlg = AllocateDialog(self, self.workspace, bibliotheca_ids)
         if dlg.run() == Gtk.ResponseType.OK:
             try:
@@ -931,7 +931,7 @@ class MainWindow(Gtk.ApplicationWindow):
     def _saved_citation_style(self):
         """The persisted citation style id for the current workspace, or the
         APA sentinel when none is stored."""
-        from .catalogue_tab import APA_STYLE_ID
+        from .gtk3_catalogue_tab import APA_STYLE_ID
         if not self.workspace:
             return APA_STYLE_ID
         styles = self.config.get("csl_styles", {}) or {}
