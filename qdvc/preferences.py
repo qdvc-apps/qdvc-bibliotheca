@@ -76,7 +76,93 @@ class PreferencesDialog(Gtk.Dialog):
             config.get("toolbar_style", "beside"))
         grid.attach(self.toolbar_combo, 1, 5, 1, 1)
 
+        # J-Flags presets (flag + priority number). Priority orders how flags
+        # are shown in the Catalogue's J-Flags column (lower = first).
+        grid.attach(_right("J-Flags:"), 0, 6, 1, 1)
+        jflags_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        jflags_sw = Gtk.ScrolledWindow()
+        jflags_sw.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        jflags_sw.set_min_content_height(120)
+        # columns: flag(str), priority(int)
+        self.jflags_store = Gtk.ListStore(str, int)
+        for flag, prio in self._load_jflags(config):
+            self.jflags_store.append([flag, prio])
+        self.jflags_view = Gtk.TreeView(model=self.jflags_store)
+        self.jflags_view.set_headers_visible(True)
+
+        flag_r = Gtk.CellRendererText()
+        flag_r.set_property("editable", True)
+        flag_r.connect("edited", self._on_flag_edited)
+        flag_col = Gtk.TreeViewColumn("Flag", flag_r, text=0)
+        flag_col.set_expand(True)
+        self.jflags_view.append_column(flag_col)
+
+        prio_r = Gtk.CellRendererText()
+        prio_r.set_property("editable", True)
+        prio_r.connect("edited", self._on_priority_edited)
+        prio_col = Gtk.TreeViewColumn("Priority", prio_r, text=1)
+        self.jflags_view.append_column(prio_col)
+
+        jflags_sw.add(self.jflags_view)
+        jflags_box.pack_start(jflags_sw, True, True, 0)
+        jflags_btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        add_btn = Gtk.Button(label="Add")
+        add_btn.connect("clicked", self._on_add_jflag)
+        del_btn = Gtk.Button(label="Remove")
+        del_btn.connect("clicked", self._on_remove_jflag)
+        jflags_btns.pack_start(add_btn, False, False, 0)
+        jflags_btns.pack_start(del_btn, False, False, 0)
+        jflags_box.pack_start(jflags_btns, False, False, 0)
+        hint = Gtk.Label(xalign=0)
+        hint.get_style_context().add_class("dim-label")
+        hint.set_markup(
+            "<small>Lower priority numbers are displayed first in the "
+            "Catalogue's J-Flags column (e.g. FT50 before A*).</small>")
+        hint.set_line_wrap(True)
+        jflags_box.pack_start(hint, False, False, 0)
+        grid.attach(jflags_box, 1, 6, 1, 1)
+
         self.show_all()
+
+    @staticmethod
+    def _load_jflags(config):
+        """Return the configured J-Flags as a list of (flag, priority-int),
+        tolerant of dict or [flag, priority] list forms."""
+        raw = config.get("jflags", []) or []
+        out = []
+        for item in raw:
+            if isinstance(item, dict):
+                flag = str(item.get("flag", "")).strip()
+                prio = item.get("priority", 0)
+            elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                flag, prio = str(item[0]).strip(), item[1]
+            else:
+                continue
+            if not flag:
+                continue
+            try:
+                prio = int(prio)
+            except (TypeError, ValueError):
+                prio = 0
+            out.append((flag, prio))
+        return out
+
+    def _on_flag_edited(self, _renderer, path, new_text):
+        self.jflags_store[path][0] = new_text.strip()
+
+    def _on_priority_edited(self, _renderer, path, new_text):
+        try:
+            self.jflags_store[path][1] = int(new_text.strip())
+        except ValueError:
+            pass
+
+    def _on_add_jflag(self, _btn):
+        self.jflags_store.append(["NEW", 0])
+
+    def _on_remove_jflag(self, _btn):
+        model, it = self.jflags_view.get_selection().get_selected()
+        if it:
+            model.remove(it)
 
     def _on_browse_library(self, _btn):
         dlg = Gtk.FileChooserDialog(
@@ -100,6 +186,12 @@ class PreferencesDialog(Gtk.Dialog):
         self.config.set("autosave_notes", self.autosave_check.get_active())
         self.config.set("toolbar_style",
                         self.toolbar_combo.get_active_id() or "beside")
+        jflags = []
+        for row in self.jflags_store:
+            flag = (row[0] or "").strip()
+            if flag:
+                jflags.append({"flag": flag, "priority": int(row[1])})
+        self.config.set("jflags", jflags)
         self.config.save()
 
 

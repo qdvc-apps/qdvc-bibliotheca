@@ -12,6 +12,7 @@ from .workspace import Workspace
 from .catalogue_tab import CatalogueTab
 from .doi_tab import DoiLookupTab
 from .authors_tab import AuthorsTab
+from .journals_tab import JournalsTab
 from .preferences import PreferencesDialog
 from .platform_utils import (open_with_default_app, open_with_text_editor,
                              reveal_in_file_manager)
@@ -80,9 +81,18 @@ class MainWindow(Gtk.ApplicationWindow):
         self.authors_tab.connect("show-author-works",
                                  self._on_show_author_works)
         self.authors_tab.connect("star-changed", self._on_author_star_changed)
+        self.journals_tab = JournalsTab()
+        self.journals_tab.connect("show-journal-works",
+                                  self._on_show_journal_works)
+        self.journals_tab.connect("star-changed",
+                                  self._on_journal_star_changed)
+        self.journals_tab.connect("journal-changed",
+                                  self._on_journal_changed)
 
         self.notebook.append_page(self.catalogue, Gtk.Label(label="Catalogue"))
         self.notebook.append_page(self.authors_tab, Gtk.Label(label="Authors"))
+        self.notebook.append_page(self.journals_tab,
+                                   Gtk.Label(label="Journals"))
         self.notebook.append_page(self.doi_tab, Gtk.Label(label="DOI Lookup"))
         self.notebook.connect("switch-page", self._on_tab_switched)
 
@@ -199,9 +209,15 @@ class MainWindow(Gtk.ApplicationWindow):
         self._accel(mi_auth, Gdk.KEY_2, Gdk.ModifierType.MOD1_MASK)
         menu.append(mi_auth)
 
+        mi_journals = _menu_item("Journals Tab")
+        mi_journals.connect("activate",
+                            lambda *_: self.notebook.set_current_page(2))
+        self._accel(mi_journals, Gdk.KEY_3, Gdk.ModifierType.MOD1_MASK)
+        menu.append(mi_journals)
+
         mi_doi = _menu_item("DOI Lookup Tab")
-        mi_doi.connect("activate", lambda *_: self.notebook.set_current_page(2))
-        self._accel(mi_doi, Gdk.KEY_3, Gdk.ModifierType.MOD1_MASK)
+        mi_doi.connect("activate", lambda *_: self.notebook.set_current_page(3))
+        self._accel(mi_doi, Gdk.KEY_4, Gdk.ModifierType.MOD1_MASK)
         menu.append(mi_doi)
 
         menu.append(Gtk.SeparatorMenuItem())
@@ -361,8 +377,11 @@ class MainWindow(Gtk.ApplicationWindow):
         self.workspace = ws
         self.catalogue.set_fulltext_root(
             self.config.get("fulltext_library_path", "") or None)
+        self.catalogue.set_jflag_priority(self._jflag_priority_map())
         self.catalogue.set_workspace(ws)
         self.authors_tab.set_workspace(ws)
+        self.journals_tab.set_jflag_presets(self._jflag_presets())
+        self.journals_tab.set_workspace(ws)
         self.doi_tab.set_workspace(ws)
         self.config.last_workspace = path
         self.config.push_recent(path)
@@ -377,6 +396,7 @@ class MainWindow(Gtk.ApplicationWindow):
     def _on_close_workspace(self, _item):
         self.catalogue.set_workspace(None)
         self.authors_tab.set_workspace(None)
+        self.journals_tab.set_workspace(None)
         self.doi_tab.set_workspace(None)
         self.workspace = None
         self.config.last_workspace = None
@@ -391,6 +411,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.workspace.load(force_rescan=True)
         self.catalogue.set_workspace(self.workspace)
         self.authors_tab.set_workspace(self.workspace)
+        self.journals_tab.set_workspace(self.workspace)
         self.doi_tab.set_workspace(self.workspace)
         self._set_status(
             f"Rescanned \u2014 {len(self.workspace.records)} records.")
@@ -425,6 +446,7 @@ class MainWindow(Gtk.ApplicationWindow):
             return
         self.catalogue.set_workspace(self.workspace)
         self.authors_tab.set_workspace(self.workspace)
+        self.journals_tab.set_workspace(self.workspace)
         # optionally allocate the freshly-imported records to the chosen work
         allocated = 0
         if work_key and imported and work_key in self.workspace.my_works:
@@ -457,8 +479,38 @@ class MainWindow(Gtk.ApplicationWindow):
         self.catalogue.set_autosave(self.config.get("autosave_notes", True))
         self.catalogue.set_fulltext_root(
             self.config.get("fulltext_library_path", "") or None)
+        self.catalogue.set_jflag_priority(self._jflag_priority_map())
+        self.journals_tab.set_jflag_presets(self._jflag_presets())
         self._apply_toolbar_style()
         self.catalogue.set_sort_spec(self._load_sort_spec())
+
+    def _jflag_presets(self):
+        """Read the J-Flag presets from config as a list of (flag, priority),
+        ordered by priority then name. Stored as [{'flag': str,
+        'priority': number}, ...]."""
+        raw = self.config.get("jflags", []) or []
+        presets = []
+        for item in raw:
+            if isinstance(item, dict):
+                flag = str(item.get("flag", "")).strip()
+                prio = item.get("priority", 0)
+            elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                flag, prio = str(item[0]).strip(), item[1]
+            else:
+                continue
+            if not flag:
+                continue
+            try:
+                prio = float(prio)
+            except (TypeError, ValueError):
+                prio = 0.0
+            presets.append((flag, prio))
+        presets.sort(key=lambda t: (t[1], t[0].lower()))
+        return presets
+
+    def _jflag_priority_map(self):
+        """{flag: priority} derived from the configured presets."""
+        return {flag: prio for flag, prio in self._jflag_presets()}
 
     def _load_sort_spec(self):
         """Read the persisted sort spec from config as a list of
@@ -764,7 +816,8 @@ class MainWindow(Gtk.ApplicationWindow):
             ("F10", "Toggle detail pane"),
             ("Alt+1", "Catalogue tab"),
             ("Alt+2", "Authors tab"),
-            ("Alt+3", "DOI Lookup tab"),
+            ("Alt+3", "Journals tab"),
+            ("Alt+4", "DOI Lookup tab"),
             ("F5", "Refresh current view"),
             ("Ctrl+Shift+S", "Sort current list"),
             ("F2", "Rename Bibliotheca ID"),
@@ -811,6 +864,20 @@ class MainWindow(Gtk.ApplicationWindow):
     def _on_author_star_changed(self, _tab, _author_id, _starred):
         # the Catalogue sidebar's Starred Authors section must be rebuilt
         self.catalogue.refresh_starred_authors()
+
+    def _on_show_journal_works(self, _tab, journal_id):
+        # jump to the Catalogue tab and filter by this journal
+        self.notebook.set_current_page(0)
+        self.catalogue.show_journal_works(journal_id)
+
+    def _on_journal_star_changed(self, _tab, _journal_id, _starred):
+        # the Catalogue sidebar's Starred Journals section must be rebuilt
+        self.catalogue.refresh_starred_journals()
+
+    def _on_journal_changed(self, _tab):
+        # a nickname or J-Flag set changed: re-render Pane 2 so the Outlet and
+        # J-Flags columns reflect it.
+        self.catalogue.refresh_starred_journals()
 
     # ==================================================================
     # Lifecycle / helpers

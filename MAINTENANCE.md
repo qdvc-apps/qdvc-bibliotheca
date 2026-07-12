@@ -53,12 +53,15 @@ qdvc/
     __init__.py            Version + app constants (APP_ID, APP_NAME, __version__).
     app.py                 Gtk.Application subclass; sets prgname + icon.
     config.py              Config: load/save YAML at the XDG config location.
-    workspace.py           MODEL. No GTK. Records, MyWork, Author, Workspace.
+    workspace.py           MODEL. No GTK. Records, MyWork, Author, Journal,
+                           Workspace.
     apa.py                 BibTeX-entry -> APA 7 formatter (markup + plain).
+    md_highlight.py        Regex Markdown highlighter for the notes buffer.
     platform_utils.py      Launch system apps (viewer, editor, file manager).
     main_window.py         MainWindow (menubar/toolbar/notebook) + ImportDialog.
     catalogue_tab.py       Three-pane Catalogue tab (the biggest UI module).
     authors_tab.py         Authors tab (list + star toggles).
+    journals_tab.py        Journals tab (list + star + nickname + J-Flags).
     doi_tab.py             DOI lookup tab.
     preferences.py         Preferences dialog.
     myworks_editor.py      Dialog to edit a "my work" (citations + published_as).
@@ -74,6 +77,8 @@ qdvc/
     markdown/<A..Z>/<bibliotheca_id>.md    YAML frontmatter + free notes.
     my_works/*.yml                         User projects (arbitrary stems).
     authors/<SURNAME_GivenNames>.yml       Derived author records + star state.
+    journals/<nickname-or-slug>.yml        Derived journal records + star,
+                                           nickname, and J-Flags.
     .qdvc-index.json                       Cache (safe to delete; regenerated).
 ```
 
@@ -161,7 +166,29 @@ starred: true
 Derived automatically (see §6). Only `starred` is user-editable state; the rest
 is a stable mapping regenerated from BibTeX.
 
-### 4.5 Index cache (`.qdvc-index.json`)
+### 4.4b journals YAML
+
+```
+name: Journal of Bibliotheca
+nickname: JBIB
+starred: true
+jflags:
+  - A*
+  - FT50
+```
+
+Derived automatically from the `journal` field of **journal-article** records
+only (book-chapter booktitles never appear here — see §6). `name` is the
+verbatim journal title and is regenerated from BibTeX; `nickname`, `starred`,
+and `jflags` are user-editable state preserved across rescans. `jflags` is
+de-duplicated and stored **alphabetically** (canonical form via
+`Journal.sorted_jflags`); the display order in the Catalogue's J-Flags column
+is by configured priority, not alphabetical. The **file stem** is the nickname
+when one is set (`JBIB.yml`), else the slug of the full name
+(`journal-of-bibliotheca.yml`); `Workspace.journal_path_for` decides. The
+in-memory key (`journal_id`) is always the slug, so state survives a nickname
+change. `Journal.to_yaml_dict` builds the dict as name, nickname (if any),
+starred, jflags, and `save` dumps with `sort_keys=False`.
 
 `{"version": INDEX_VERSION, "records": [ {…}, … ]}`. Each record stores only
 display/index fields: `bibliotheca_id, bib_path, md_path, entrytype,
@@ -178,7 +205,10 @@ referenced `.bib` path no longer exists.
 (falling back to `~/.config`). `DEFAULTS` holds `last_workspace`,
 `recent_workspaces`, and `window` size. Additional keys set via
 `Config.set`/`get`: `notes_font`, `file_manager`, `fulltext_library_path`,
-`reopen_last`, `autosave_notes`, `toolbar_style`. When you add a preference,
+`reopen_last`, `autosave_notes`, `toolbar_style`, `jflags`. The `jflags` key is
+a list of `{flag, priority}` dicts — the J-Flag presets and their priority
+numbers (lower = shown first in the Catalogue's J-Flags column); read via
+`MainWindow._jflag_presets`/`_jflag_priority_map`. When you add a preference,
 add it in `preferences.py` (widget + `apply()`) and read it where used; no
 schema migration is needed because `Config.get` takes a default.
 
@@ -204,27 +234,44 @@ title for book chapters, em dash otherwise — drives the Outlet column).
 `author_id, surname, given_names, starred, path, record_ids[]`. `record_ids`
 is populated at load, not persisted. `display_name` = `"Surname, Given"`.
 
+### 5.3b `Journal`
+
+`journal_id, name, nickname, starred, jflags[], path, record_ids[]`.
+`journal_id` is the slug of the full `name` (stable in-memory key; does **not**
+change when a nickname is set). `record_ids` is populated at load, not
+persisted. `display_name` = the full `name`. `sorted_jflags()` gives the
+de-duplicated, alphabetical (canonical, on-disk) J-Flag order; the UI reorders
+by priority for display. `save()` writes atomically to `path` (the
+nickname-or-slug file — see §4.4b).
+
 ### 5.4 `Workspace` — load pipeline
 
 ```
 load(force_rescan=False):
     if not force_rescan and _load_index():   # fast path from cache
-        _load_my_works(); _build_doi_index(); _derive_authors(); return
+        _load_my_works(); _build_doi_index()
+        _derive_authors(); _derive_journals(); return
     _scan()                                    # slow path: read every .bib
-    _load_my_works(); _build_doi_index(); _derive_authors(); _save_index()
+    _load_my_works(); _build_doi_index()
+    _derive_authors(); _derive_journals(); _save_index()
 ```
 
 - `_scan` walks `bibtex/**/*.bib`, parses each, checks the paired `.md` for
   `pdf`/`epub` frontmatter to set `has_pdf`/`has_epub`.
 - `_build_doi_index` maps normalised DOI -> bibliotheca_id (for the DOI tab).
 - `_derive_authors` (see §6).
+- `_derive_journals` (see §6). Journals, like authors, are derived on every
+  load from records + `journals/*.yml`; they are **not** cached in the index,
+  so `INDEX_VERSION` is unaffected by these features.
 
 ### 5.5 Query API (used by the UI)
 
 `all_records`, `records_by_type(label)`, `records_by_fulltext(which)` (which ∈
 {"pdf","epub","none"}), `records_by_doi_status(has_doi)`,
 `records_for_work(key)`, `records_for_author(author_id)`, `all_authors`,
-`starred_authors`, `lookup_doi(doi)`, `get(bibliotheca_id)`.
+`starred_authors`, `all_journals`, `starred_journals`,
+`records_for_journal(journal_id)`, `journal_for_record(rec)` (None when the
+record is not a journal article), `lookup_doi(doi)`, `get(bibliotheca_id)`.
 
 ### 5.6 Mutation API
 
@@ -240,6 +287,11 @@ load(force_rescan=False):
   work's `cites`, skipping ids already present; saves (canonicalising) only if
   something was added; returns the count added. Used by the record "Allocate to
   My Works…" flow and the allocate-after-import option.
+- `set_journal_starred(journal_id, bool)` / `set_journal_jflags(journal_id,
+  flags)` — flip the flag / replace the J-Flag list and re-save that one
+  journal file. `set_journal_nickname(journal_id, nickname)` sets or clears the
+  nickname, writing the new (nickname-or-slug) file first and deleting the stale
+  one.
 - `set_fulltext_path(id, kind, abs_path|None, storage_root)` — writes the
   `pdf`/`epub` frontmatter **relative to `storage_root`** when the file is
   inside it, else absolute; updates `has_pdf`/`has_epub`; re-saves index.
@@ -258,7 +310,10 @@ before the existence check. When you add a check, add its key here **and** a
 
 `make_author_id(surname, given)` → `SURNAME_GivenNames` (surname uppercased,
 given-names title-cased, non-alphanumerics stripped). `_sanitise_id` for safe
-file stems. `_normalise_doi` strips a `doi.org/` prefix.
+file stems. `_normalise_doi` strips a `doi.org/` prefix. `slugify_journal(name)`
+→ lowercase hyphen-joined slug (the stable `journal_id`, e.g. "Journal of
+Bibliotheca" → `journal-of-bibliotheca`). `_sanitise_stem` makes a safe file
+stem **preserving case** (used for nickname filenames like `JBIB.yml`).
 
 ---
 
@@ -278,6 +333,22 @@ This is the subtle part. On every load:
 
 So stars survive rescans, and new authors get a file the first time they're
 seen. `set_author_starred` flips the flag and re-saves that one file.
+
+### 6.1 Journal derivation (`_derive_journals`)
+
+Mirrors author derivation, with two twists:
+
+1. Load any existing `journals/*.yml` into a `persisted` map keyed by the slug
+   of each file's stored `name` (so the key is stable regardless of the file
+   stem, which follows the nickname). This preserves `starred`, `nickname`, and
+   `jflags`.
+2. Walk records but **only** those whose `type_label == "Journal article"`;
+   compute the `journal_id` with `slugify_journal(rec.journal)`. Book-chapter
+   booktitles never create a journal. Reuse the persisted `Journal` if present
+   (refreshing its `name` from the current BibTeX), else create a new one.
+3. Build `_journal_records: journal_id -> [bibliotheca_id]`.
+4. Persist any journal that has no file yet (at its nickname-or-slug path).
+5. Populate each `Journal.record_ids`.
 
 ---
 
@@ -315,9 +386,10 @@ matches the `.desktop` `StartupWMClass` (needed for the MATE panel icon).
 `MainWindow`; `do_open` routes a folder argument to `_open_path`.
 
 `main_window.py` builds a `Gtk.Box` containing menubar, toolbar, a
-`Gtk.Notebook` (Catalogue / Authors / DOI Lookup, in that order — index 0/1/2,
-which the Alt+1/2/3 accelerators and `_on_goto_record`/`_on_show_author_works`
-depend on), and a status bar.
+`Gtk.Notebook` (Catalogue / Authors / Journals / DOI Lookup, in that order —
+index 0/1/2/3, which the Alt+1/2/3/4 accelerators and
+`_on_goto_record`/`_on_show_author_works`/`_on_show_journal_works` depend on),
+and a status bar.
 
 `_menu_item(label, icon)` builds menu items as a `Box(Image+Label)` inside a
 plain `MenuItem` — deliberately **not** `Gtk.ImageMenuItem`, which is removed in
@@ -340,16 +412,20 @@ actions moved to the Catalogue's row right-click menu (see §8.2), and F2
 Three panes in nested `Gtk.Paned`:
 
 - **Pane 1 (sidebar)** — a `Gtk.TreeStore` with columns
-  `(icon_name, label, kind, key, pango_style_int)`. Node "kind" constants:
-  `NODE_ALL, NODE_TYPE, NODE_WORK, NODE_WORKS_ROOT, NODE_AUTHOR, NODE_FULLTEXT,
-  NODE_DOI, NODE_TEMP`. Sections: All articles / By type (Journal article /
-  Book chapter / Book / Webpage / Other — note **Conference paper is not
-  listed** as a filter, though records may still carry that type label) / By
-  full-text (PDF available / EPUB available / Not available, keys
-  `pdf`/`epub`/`none`) / By DOI status (DOI is set / not set, keys
-  `set`/`unset`) / My works / Starred authors. Selecting a node calls
-  `_apply_filter(kind, key)`, which repopulates Pane 2 and records
-  `_active_filter` (so `refresh_current_view` can re-apply it).
+  `(icon_name, label, kind, key, pango_style_int, count_str)`. Node "kind"
+  constants: `NODE_ALL, NODE_TYPE, NODE_WORK, NODE_WORKS_ROOT, NODE_AUTHOR,
+  NODE_JOURNAL, NODE_FULLTEXT, NODE_DOI, NODE_TEMP`. Sections: All articles / By
+  type (Journal article / Book chapter / Book / Webpage / Other — note
+  **Conference paper is not listed** as a filter, though records may still carry
+  that type label) / By full-text (PDF available / EPUB available / Not
+  available, keys `pdf`/`epub`/`none`) / By DOI status (DOI is set / not set,
+  keys `set`/`unset`) / My works / Starred authors / Starred journals.
+  Selecting a node calls `_apply_filter(kind, key)`, which repopulates Pane 2
+  and records `_active_filter` (so `refresh_current_view` can re-apply it). A
+  second, right-aligned column shows the number of articles each filter row
+  would surface (`(N)`, blank when zero); the counts are precomputed by
+  `_compute_sidebar_counts` and formatted by the module-level `_count_label`
+  (author/journal rows read straight from `record_ids`).
 
   - **Right-click** (`_on_sidebar_button_press`): on the My-works root →
     "Add work…"; on a work → "Edit work… / Open YAML in Text Editor / Add
@@ -361,16 +437,27 @@ Three panes in nested `Gtk.Paned`:
     an italic "Query: …" node pinned at the bottom and selects it, so Pane 1
     stays consistent with Pane 2. Selecting any other node removes it
     (`_remove_temp_node`). The italic is done via the pango-style column
-    (`_pango_style_italic()`), guarded so it degrades under the test stub.
+    (`_pango_style_italic()`), guarded so it degrades under the test stub. The
+    Journals tab's `show_journal_works` selects a starred journal's node when it
+    has one, else applies the `NODE_JOURNAL` filter directly (no transient
+    node).
 
 - **Pane 2 (master)** — a `Gtk.ListStore` with columns
-  `(pdf_icon, bibliotheca_id, author, year, outlet, title, type)`. **Column 0
-  is the PDF icon**, so every text-column index is offset by one — remember
-  this if you add columns or touch `_populate_master`, `_filter_visible`
-  (searches columns 1..6), `_on_master_changed` (reads col 1 for the id), or
-  `reveal_record`/`_update_row_pdf_icon` (match on col 1). The Year column is
-  fixed-width so 4-digit years aren't ellipsised. A `filter_new()` model backs
-  the search box.
+  `(pdf_icon, bibliotheca_id, author, year, jflags, outlet, title, type)`.
+  **Column 0 is the PDF icon**, so every text-column index is offset by one —
+  remember this if you add columns or touch `_populate_master`/`_master_row`,
+  `_filter_visible` (searches columns 1..7), `_on_master_changed` (reads col 1
+  for the id), or `reveal_record`/`_update_row_pdf_icon` (match on col 1). The
+  **J-Flags** column (store col 4, before Outlet) is rendered plain text via
+  `_jflags_display` (journal's flags ordered by configured priority through the
+  module-level `_order_jflags`; an em dash when the record is not a journal
+  article or the journal has no flags). The **Outlet** column (store col 5) is
+  rendered as **Pango markup** (`markup=` attribute, not `text=`) via
+  `_outlet_markup`, so a journal's nickname can be shown in bold brackets before
+  the full name (e.g. `<b>(JBIB)</b> Journal of Bibliotheca`); the nickname is a
+  display-only preface and never enters the Pane 3 APA reference. The Year
+  column is fixed-width so 4-digit years aren't ellipsised. A `filter_new()`
+  model backs the search box.
 
   - **Right-click** (`_on_master_button_press`): the primary record menu. It
     carries, top to bottom (all via `_img_menu_item`, so all have icons):
@@ -412,6 +499,15 @@ writes on record switch, on `set_fulltext`/`clear`, on workspace change, and on
 window close. Honours the `autosave` preference. Suppressed during programmatic
 buffer loads via `_suppress_notes_save`.
 
+**Notes syntax highlighting**: the notes `TextBuffer` is wrapped by a
+`MarkdownHighlighter` (`md_highlight.py`, ported from the QDVC Markdown Notebook
+project). It applies colour/weight/style tags — no font-size variation — so the
+notes read as highlighted Markdown while staying plain, editable text.
+`highlight()` runs after a record's notes load (in `_show_detail`, where the
+`_suppress_notes_save` guard skips the `changed` handler) and again inside
+`_on_notes_changed` on every edit. `set_notes_font` keeps the highlighter's
+code-span font in step with the notes font.
+
 **Rich clipboard**: `Gtk.Clipboard.set_with_data` is not introspectable in
 PyGObject (calling it crashes the interpreter), so rich copy uses a
 `_ClipboardOwner` GObject held in a **module-level strong reference**
@@ -420,8 +516,9 @@ PyGObject (calling it crashes the interpreter), so rich copy uses a
 this back to `set_with_data`.
 
 Public methods the main window calls: `set_workspace`, `set_fulltext_root`,
-`set_notes_font`, `set_autosave`, `set_sidebar_visible`, `set_detail_visible`,
-`refresh_current_view`, `refresh_starred_authors`, `show_author_works`,
+`set_notes_font`, `set_autosave`, `set_jflag_priority`, `set_sidebar_visible`,
+`set_detail_visible`, `refresh_current_view`, `refresh_starred_authors`,
+`refresh_starred_journals`, `show_author_works`, `show_journal_works`,
 `reveal_record`, `current_record`, `flush_notes`, `set_sort_spec`,
 `get_sort_spec`.
 
@@ -434,6 +531,23 @@ child store** via `convert_path_to_child_path` before flipping — keep that
 conversion if you touch it. Emits `star-changed(author_id, bool)` and
 `show-author-works(author_id)`. The main window relays these to
 `catalogue.refresh_starred_authors()` and `catalogue.show_author_works()`.
+
+### 8.3b Journals tab (`journals_tab.py`)
+
+A `ListStore(bool, str, str, str, str, int)` = (starred, name, nickname,
+jflags_joined, journal_id, article_count) behind a filter (text + "starred
+only"). Same `CellRendererToggle` + `convert_path_to_child_path` star pattern as
+the Authors tab. Two extra actions at the bottom: **Set nickname…**
+(`_on_set_nickname` → `Workspace.set_journal_nickname`, which renames the YAML
+file) and **Set J-Flags…** (`_on_set_jflags` — a checklist of the presets from
+`set_jflag_presets`, plus any non-preset flag already on the journal so
+hand-added flags aren't dropped → `Workspace.set_journal_jflags`). Emits
+`star-changed(journal_id, bool)`, `show-journal-works(journal_id)`, and
+`journal-changed()`. The main window relays these to
+`catalogue.refresh_starred_journals()`, `catalogue.show_journal_works()`, and
+(for `journal-changed`) `catalogue.refresh_starred_journals()` again so the
+Catalogue's Outlet/J-Flags columns re-render. `set_jflag_presets` is pushed from
+`MainWindow._jflag_presets()` on workspace open and on preference changes.
 
 ### 8.4 DOI tab (`doi_tab.py`)
 
@@ -461,9 +575,12 @@ the main window routes to the Catalogue (`reveal_record`). On miss, shows
   active filter). Used both from the record right-click "Allocate to My Works…"
   and the allocate-after-import path.
 - `PreferencesDialog` — font, file-manager command, full-text library path,
-  reopen-last, autosave, toolbar style. `apply()` writes to `Config`;
-  `MainWindow._apply_prefs_to_widgets` pushes values into the widgets and calls
-  `_apply_toolbar_style`.
+  reopen-last, autosave, toolbar style, and a **J-Flags** editor (an editable
+  `flag`/`priority` list with Add/Remove, persisted to the `jflags` config key
+  as `{flag, priority}` dicts). `apply()` writes to `Config`;
+  `MainWindow._apply_prefs_to_widgets` pushes values into the widgets, calls
+  `_apply_toolbar_style`, and pushes the J-Flag priority map into the Catalogue
+  and the presets into the Journals tab.
 - `MyWorkEditor` — two-list citation picker + name + `published_as` combo;
   keeps its cited list alphabetical and inserts additions at their sorted slot.
 
@@ -512,11 +629,14 @@ placeholder, not a crash).
 ## 10. Common maintenance tasks — where to touch
 
 - **Add a master-table column** → `catalogue_tab._build_master` (mind the
-  column-0 offset), `_populate_master`, `_filter_visible` range, and any code
-  reading store columns by index.
+  column-0 offset and that Outlet is a `markup=` column), `_master_row`,
+  `_filter_visible` range (currently 1..7), and any code reading store columns
+  by index.
 - **Add a sidebar filter category** → add a `NODE_*` constant, build the nodes
-  in `_rebuild_sidebar`, handle it in `_apply_filter`, and add the backing
-  query to `Workspace`.
+  in `_rebuild_sidebar` (remember the trailing count-string column; use
+  `_count_label`), extend `_compute_sidebar_counts` if the count isn't already
+  available, handle it in `_apply_filter`, and add the backing query to
+  `Workspace`.
 - **Add a validation check** → add the key + logic in `Workspace.validate`, and
   a `section(...)` line in `MainWindow._format_report`.
 - **Add a sortable field** → add an entry to `SORT_KEYS` (id → key function)
@@ -525,6 +645,11 @@ placeholder, not a crash).
 - **Add a preference** → widget + `apply()` in `preferences.py`; read via
   `config.get(key, default)`; if it affects widgets live, push it in
   `_apply_prefs_to_widgets`.
+- **Tweak journals / J-Flags / nicknames** → the `Journal` dataclass and
+  `_derive_journals`/`set_journal_*` in `workspace.py` (model); the display in
+  `catalogue_tab._outlet_markup`/`_jflags_display`/`_order_jflags`; the editors
+  in `journals_tab.py`; the presets in `preferences.py` + `MainWindow`'s
+  `_jflag_presets`/`_jflag_priority_map`.
 - **Add a BibTeX entry type / tweak APA** → `apa._RENDERERS`, `TYPE_LABELS`.
   If you add a new human label, update `Record.outlet` and any By-type list.
 - **Change the cached record schema** → update `Record`, `_scan`, `_load_index`,

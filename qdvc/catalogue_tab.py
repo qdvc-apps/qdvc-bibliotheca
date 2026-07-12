@@ -9,6 +9,7 @@ from gi.repository import Gtk, Gdk, Pango, GObject  # noqa: E402
 
 from .platform_utils import (open_with_default_app,  # noqa: E402
                              open_with_text_editor)
+from .md_highlight import MarkdownHighlighter  # noqa: E402
 
 
 # Sidebar node kinds
@@ -17,6 +18,7 @@ NODE_TYPE = "type"
 NODE_WORK = "work"
 NODE_WORKS_ROOT = "works_root"
 NODE_AUTHOR = "author"
+NODE_JOURNAL = "journal"
 NODE_FULLTEXT = "fulltext"   # key in {"pdf","epub","none"}
 NODE_DOI = "doi"             # key in {"set","unset"}
 NODE_TEMP = "temp"  # transient "query results" node at the bottom
@@ -81,6 +83,9 @@ class CatalogueTab(Gtk.Box):
         self._sort_spec = []
         # cache of the records currently shown (post-filter, pre-sort source)
         self._current_records = []
+        # J-Flag -> priority number, used to order the J-Flags column. Lower
+        # numbers display first. Populated from config via set_jflag_priority.
+        self._jflag_priority = {}
 
         self.paned_outer = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
         self.paned_inner = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
@@ -108,8 +113,8 @@ class CatalogueTab(Gtk.Box):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         sw = Gtk.ScrolledWindow()
         sw.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        # columns: icon-name, label, kind, key, pango-style(int)
-        self.side_store = Gtk.TreeStore(str, str, str, str, int)
+        # columns: icon-name, label, kind, key, pango-style(int), count(str)
+        self.side_store = Gtk.TreeStore(str, str, str, str, int, str)
         self.side_view = Gtk.TreeView(model=self.side_store)
         self.side_view.set_headers_visible(False)
         col = Gtk.TreeViewColumn("")
@@ -121,6 +126,14 @@ class CatalogueTab(Gtk.Box):
         col.add_attribute(text_r, "text", 1)
         col.add_attribute(text_r, "style", 4)
         self.side_view.append_column(col)
+        # A second, right-aligned column shows the number of articles that the
+        # row would surface in Pane 2. Blank for section headers and for rows
+        # whose count is zero.
+        count_r = Gtk.CellRendererText()
+        count_r.set_property("xalign", 1.0)
+        count_col = Gtk.TreeViewColumn("", count_r, text=5)
+        count_col.set_alignment(1.0)
+        self.side_view.append_column(count_col)
         self.side_view.get_selection().connect("changed",
                                                self._on_sidebar_changed)
         self.side_view.connect("row-activated", self._on_sidebar_activated)
@@ -135,10 +148,18 @@ class CatalogueTab(Gtk.Box):
         self.side_store.clear()
         self._temp_author_id = temp_author_id
         n = _pango_style_normal()
+        # Precompute the article counts each filter row would surface, so the
+        # count column can be filled as rows are built.
+        counts = self._compute_sidebar_counts()
+
+        def clabel(val):
+            return _count_label(val)
+
         self.side_store.append(
-            None, ["edit-select-all", "All articles", NODE_ALL, "", n])
+            None, ["edit-select-all", "All articles", NODE_ALL, "", n,
+                   clabel(counts["all"])])
         by_type = self.side_store.append(
-            None, ["view-list-symbolic", "By type", "", "", n])
+            None, ["view-list-symbolic", "By type", "", "", n, ""])
         type_icons = {
             "Journal article": "text-x-generic",
             "Conference paper": "presentation",
@@ -151,56 +172,107 @@ class CatalogueTab(Gtk.Box):
                       "Book", "Webpage", "Other"]:
             self.side_store.append(
                 by_type, [type_icons.get(label, "text-x-generic"),
-                          label, NODE_TYPE, label, n])
+                          label, NODE_TYPE, label, n,
+                          clabel(counts["type"].get(label, 0))])
 
         by_ft = self.side_store.append(
-            None, ["emblem-documents", "By full-text", "", "", n])
+            None, ["emblem-documents", "By full-text", "", "", n, ""])
         self.side_store.append(
             by_ft, ["application-pdf", "PDF available", NODE_FULLTEXT,
-                    "pdf", n])
+                    "pdf", n, clabel(counts["ft"].get("pdf", 0))])
         self.side_store.append(
             by_ft, ["x-office-document", "EPUB available", NODE_FULLTEXT,
-                    "epub", n])
+                    "epub", n, clabel(counts["ft"].get("epub", 0))])
         self.side_store.append(
             by_ft, ["window-close", "Not available", NODE_FULLTEXT,
-                    "none", n])
+                    "none", n, clabel(counts["ft"].get("none", 0))])
 
         by_doi = self.side_store.append(
-            None, ["insert-link", "By DOI status", "", "", n])
+            None, ["insert-link", "By DOI status", "", "", n, ""])
         self.side_store.append(
-            by_doi, ["insert-link", "DOI is set", NODE_DOI, "set", n])
+            by_doi, ["insert-link", "DOI is set", NODE_DOI, "set", n,
+                     clabel(counts["doi"].get("set", 0))])
         self.side_store.append(
             by_doi, ["window-close", "DOI is not set", NODE_DOI,
-                     "unset", n])
+                     "unset", n, clabel(counts["doi"].get("unset", 0))])
 
         works = self.side_store.append(
-            None, ["folder-documents", "My works", NODE_WORKS_ROOT, "", n])
+            None, ["folder-documents", "My works", NODE_WORKS_ROOT, "", n, ""])
         if self.workspace:
             for key, work in sorted(self.workspace.my_works.items(),
                                     key=lambda kv: kv[1].name.lower()):
                 self.side_store.append(
-                    works, ["emblem-favorite", work.name, NODE_WORK, key, n])
+                    works, ["emblem-favorite", work.name, NODE_WORK, key, n,
+                            clabel(counts["work"].get(key, 0))])
 
         starred_root = self.side_store.append(
-            None, ["starred", "Starred authors", "", "", n])
+            None, ["starred", "Starred authors", "", "", n, ""])
         if self.workspace:
             for a in self.workspace.starred_authors():
                 self.side_store.append(
                     starred_root, ["starred", a.display_name,
-                                   NODE_AUTHOR, a.author_id, n])
+                                   NODE_AUTHOR, a.author_id, n,
+                                   clabel(len(a.record_ids))])
+
+        starred_journals_root = self.side_store.append(
+            None, ["starred", "Starred journals", "", "", n, ""])
+        if self.workspace:
+            for j in self.workspace.starred_journals():
+                self.side_store.append(
+                    starred_journals_root, ["starred", j.display_name,
+                                            NODE_JOURNAL, j.journal_id, n,
+                                            clabel(len(j.record_ids))])
 
         # transient "query results" node pinned at the very bottom
         if temp_author_id and self.workspace:
             author = self.workspace.authors.get(temp_author_id)
             label = "Query results"
+            temp_count = 0
             if author:
                 label = f"Query: {author.display_name}"
+                temp_count = len(author.record_ids)
             self._temp_iter = self.side_store.append(
                 None, ["edit-find", label, NODE_TEMP, temp_author_id,
-                       _pango_style_italic()])
+                       _pango_style_italic(), clabel(temp_count)])
         else:
             self._temp_iter = None
         self.side_view.expand_all()
+
+    def _compute_sidebar_counts(self):
+        """Return a dict of article counts for the fixed filter rows.
+
+        Keys: 'all' (int), 'type' (label->int), 'ft' (pdf/epub/none->int),
+        'doi' (set/unset->int), 'work' (work_key->int). Author counts come
+        straight from each Author.record_ids and are not precomputed here.
+        """
+        counts = {
+            "all": 0,
+            "type": {},
+            "ft": {"pdf": 0, "epub": 0, "none": 0},
+            "doi": {"set": 0, "unset": 0},
+            "work": {},
+        }
+        if not self.workspace:
+            return counts
+        records = self.workspace.all_records()
+        counts["all"] = len(records)
+        for r in records:
+            counts["type"][r.type_label] = \
+                counts["type"].get(r.type_label, 0) + 1
+            if getattr(r, "has_pdf", False):
+                counts["ft"]["pdf"] += 1
+            if getattr(r, "has_epub", False):
+                counts["ft"]["epub"] += 1
+            if not getattr(r, "has_pdf", False) \
+                    and not getattr(r, "has_epub", False):
+                counts["ft"]["none"] += 1
+            if r.doi:
+                counts["doi"]["set"] += 1
+            else:
+                counts["doi"]["unset"] += 1
+        for key in self.workspace.my_works:
+            counts["work"][key] = len(self.workspace.records_for_work(key))
+        return counts
 
     def _on_sidebar_changed(self, selection):
         if self._suppress_sidebar_change:
@@ -249,6 +321,9 @@ class CatalogueTab(Gtk.Box):
         elif kind in (NODE_AUTHOR, NODE_TEMP):
             self._active_filter = (kind, key)
             self._populate_master(self.workspace.records_for_author(key))
+        elif kind == NODE_JOURNAL:
+            self._active_filter = (NODE_JOURNAL, key)
+            self._populate_master(self.workspace.records_for_journal(key))
 
     def _on_sidebar_activated(self, _view, path, _col):
         it = self.side_store.get_iter(path)
@@ -360,8 +435,11 @@ class CatalogueTab(Gtk.Box):
 
         sw = Gtk.ScrolledWindow()
         sw.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-        # columns: pdf_icon, bibliotheca_id, author, year, outlet, title, type
-        self.master_store = Gtk.ListStore(str, str, str, str, str, str, str)
+        # columns: pdf_icon, bibliotheca_id, author, year, jflags, outlet,
+        # title, type. The Outlet cell holds Pango markup (so a journal's
+        # nickname can be shown in bold), hence it is rendered via "markup".
+        self.master_store = Gtk.ListStore(str, str, str, str, str, str, str,
+                                          str)
         self.master_filter = self.master_store.filter_new()
         self.master_filter.set_visible_func(self._filter_visible)
         self.master_view = Gtk.TreeView(model=self.master_filter)
@@ -375,13 +453,17 @@ class CatalogueTab(Gtk.Box):
         pdf_col.set_sizing(Gtk.TreeViewColumnSizing.FIXED)
         self.master_view.append_column(pdf_col)
 
-        text_cols = ["Bibliotheca ID", "Author", "Year", "Outlet", "Title",
-                     "Type"]
-        for offset, title in enumerate(text_cols):
-            i = offset + 1  # store column (0 is the icon)
+        # (title, store-index). J-Flags sits just before Outlet. Outlet is
+        # rendered from markup; every other text column from plain text.
+        text_cols = [("Bibliotheca ID", 1), ("Author", 2), ("Year", 3),
+                     ("J-Flags", 4), ("Outlet", 5), ("Title", 6), ("Type", 7)]
+        for title, i in text_cols:
             r = Gtk.CellRendererText()
             r.set_property("ellipsize", Pango.EllipsizeMode.END)
-            c = Gtk.TreeViewColumn(title, r, text=i)
+            if title == "Outlet":
+                c = Gtk.TreeViewColumn(title, r, markup=i)
+            else:
+                c = Gtk.TreeViewColumn(title, r, text=i)
             c.set_resizable(True)
             c.set_sort_column_id(i)
             if title == "Year":
@@ -389,6 +471,9 @@ class CatalogueTab(Gtk.Box):
                 c.set_sizing(Gtk.TreeViewColumnSizing.FIXED)
                 c.set_fixed_width(60)
                 c.set_min_width(60)
+                r.set_property("ellipsize", Pango.EllipsizeMode.NONE)
+            elif title == "J-Flags":
+                c.set_min_width(80)
                 r.set_property("ellipsize", Pango.EllipsizeMode.NONE)
             elif title == "Title":
                 c.set_expand(True)
@@ -401,14 +486,45 @@ class CatalogueTab(Gtk.Box):
         box.pack_start(sw, True, True, 0)
         return box
 
+    def _master_row(self, r):
+        """Build a master-store row for a record, including the J-Flags cell
+        and the (possibly nickname-prefaced) Outlet markup."""
+        icon = "application-pdf" if getattr(r, "has_pdf", False) else ""
+        return [icon, r.bibliotheca_id, r.author, r.year,
+                self._jflags_display(r), self._outlet_markup(r), r.title,
+                r.type_label]
+
+    def _outlet_markup(self, r):
+        """Pango markup for the Outlet cell. For a journal article whose
+        journal has a nickname, preface the full name with the nickname in
+        bold brackets, e.g. '<b>(JBIB)</b> Journal of Bibliotheca'. Otherwise
+        just the escaped outlet text."""
+        from html import escape
+        outlet = r.outlet or "\u2014"
+        journal = None
+        if self.workspace:
+            journal = self.workspace.journal_for_record(r)
+        if journal and journal.nickname:
+            return (f"<b>({escape(journal.nickname)})</b> "
+                    f"{escape(journal.name)}")
+        return escape(outlet)
+
+    def _jflags_display(self, r):
+        """The J-Flags cell text: the journal's flags ordered by their
+        configured priority, comma-separated (e.g. 'FT50, A*'). An em dash when
+        the record is not a journal article or the journal has no flags."""
+        journal = self.workspace.journal_for_record(r) if self.workspace \
+            else None
+        if not journal or not journal.jflags:
+            return "\u2014"
+        ordered = _order_jflags(journal.sorted_jflags(), self._jflag_priority)
+        return ", ".join(ordered) if ordered else "\u2014"
+
     def _populate_master(self, records):
         self._current_records = list(records)
         self.master_store.clear()
         for r in self._sorted_records(self._current_records):
-            icon = "application-pdf" if getattr(r, "has_pdf", False) else ""
-            self.master_store.append(
-                [icon, r.bibliotheca_id, r.author, r.year, r.outlet, r.title,
-                 r.type_label])
+            self.master_store.append(self._master_row(r))
 
     def _sorted_records(self, records):
         """Return records ordered by the current multi-key sort spec.
@@ -432,10 +548,7 @@ class CatalogueTab(Gtk.Box):
         # re-render the currently shown records with the new order
         self.master_store.clear()
         for r in self._sorted_records(self._current_records):
-            icon = "application-pdf" if getattr(r, "has_pdf", False) else ""
-            self.master_store.append(
-                [icon, r.bibliotheca_id, r.author, r.year, r.outlet, r.title,
-                 r.type_label])
+            self.master_store.append(self._master_row(r))
 
     def get_sort_spec(self):
         return list(self._sort_spec)
@@ -445,7 +558,7 @@ class CatalogueTab(Gtk.Box):
         if not needle:
             return True
         # search only the text columns (skip the icon column 0)
-        for col in range(1, 7):
+        for col in range(1, 8):
             val = model[it][col] or ""
             if needle in val.lower():
                 return True
@@ -519,6 +632,8 @@ class CatalogueTab(Gtk.Box):
         self.notes_view.set_monospace(True)
         self.notes_buffer = self.notes_view.get_buffer()
         self.notes_buffer.connect("changed", self._on_notes_changed)
+        # Syntax-highlight the Markdown notes as the user reads/edits them.
+        self.highlighter = MarkdownHighlighter(self.notes_buffer)
         notes_sw.add(self.notes_view)
         box.pack_start(notes_sw, True, True, 0)
 
@@ -550,6 +665,7 @@ class CatalogueTab(Gtk.Box):
         self._suppress_notes_save = True
         self.notes_buffer.set_text(body)
         self._suppress_notes_save = False
+        self.highlighter.highlight()
         self._set_detail_sensitive(True)
 
         self._refresh_detail_status(rec)
@@ -579,6 +695,7 @@ class CatalogueTab(Gtk.Box):
             return
         # debounce-lite: save on focus-out / record change; mark dirty here.
         self._notes_dirty = True
+        self.highlighter.highlight()
 
     def _flush_notes(self):
         rec = getattr(self, "_current_record", None)
@@ -887,9 +1004,22 @@ class CatalogueTab(Gtk.Box):
                 Pango.FontDescription.from_string(font_str))
         except Exception:  # noqa: BLE001
             pass
+        # keep the highlighter's code-span font in step with the notes font
+        try:
+            self.highlighter.set_code_font(font_str)
+        except Exception:  # noqa: BLE001
+            pass
 
     def set_autosave(self, on):
         self._autosave = bool(on)
+
+    def set_jflag_priority(self, priority_map):
+        """Set the J-Flag -> priority-number mapping used to order the J-Flags
+        column. Lower numbers display first. Re-renders the current view so the
+        ordering takes effect immediately."""
+        self._jflag_priority = dict(priority_map or {})
+        # re-render with the current sort so J-Flags cells refresh
+        self.set_sort_spec(self._sort_spec)
 
     def set_fulltext_root(self, path):
         self._fulltext_root = path or None
@@ -898,6 +1028,13 @@ class CatalogueTab(Gtk.Box):
         """Rebuild the sidebar so the Starred Authors section reflects
         changes made in the Authors tab."""
         self._rebuild_sidebar()
+
+    def refresh_starred_journals(self):
+        """Rebuild the sidebar so the Starred Journals section reflects
+        changes made in the Journals tab, and re-render Pane 2 so J-Flags and
+        nickname changes show immediately."""
+        self._rebuild_sidebar()
+        self.set_sort_spec(self._sort_spec)
 
     def refresh_after_allocation(self):
         """Rebuild the sidebar (a new work may exist) and re-apply the current
@@ -955,6 +1092,23 @@ class CatalogueTab(Gtk.Box):
                 return True
         return False
 
+    def show_journal_works(self, journal_id):
+        """Filter the master list to a given journal's articles, jumping from
+        the Journals tab. If the journal is starred it has a sidebar node to
+        select; otherwise the filter is applied directly."""
+        if not self.workspace:
+            return
+        if self._temp_iter is not None:
+            self._remove_temp_node()
+        self._rebuild_sidebar()
+        for row in self.side_store:
+            for child in row.iterchildren():
+                if child[2] == NODE_JOURNAL and child[3] == journal_id:
+                    self.side_view.get_selection().select_iter(child.iter)
+                    return
+        # not starred (no node): apply the filter directly
+        self._apply_filter(NODE_JOURNAL, journal_id)
+
     def show_work(self, work_key):
         """Select a given 'my work' in the sidebar and filter to it."""
         if not self.workspace:
@@ -990,6 +1144,33 @@ def _img_menu_item(label, icon_name):
 def _markup_to_html(markup: str) -> str:
     # Pango uses <i>, which is already valid HTML. Wrap for completeness.
     return f"<html><body>{markup}</body></html>"
+
+
+def _count_label(n) -> str:
+    """Format a sidebar row count: '(N)' when positive, '' when zero, so rows
+    that would surface no articles show a blank count column."""
+    try:
+        n = int(n)
+    except (TypeError, ValueError):
+        return ""
+    return f"({n})" if n > 0 else ""
+
+
+def _order_jflags(jflags, priority_map):
+    """Order J-Flags for display by their configured priority number (lower
+    first). Flags without a configured priority sort after those with one,
+    then alphabetically as a tie-breaker."""
+    priority_map = priority_map or {}
+
+    def sort_key(flag):
+        if flag in priority_map:
+            try:
+                return (0, float(priority_map[flag]), flag.lower())
+            except (TypeError, ValueError):
+                return (0, 0.0, flag.lower())
+        return (1, 0.0, flag.lower())
+
+    return sorted(jflags, key=sort_key)
 
 
 def _pango_style_normal() -> int:

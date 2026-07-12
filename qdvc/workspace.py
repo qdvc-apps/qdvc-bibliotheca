@@ -282,15 +282,76 @@ class Author:
         tmp.write_text(text, encoding="utf-8")
         os.replace(tmp, p)
 
+
+@dataclass
+class Journal:
+    """A journal derived from the `journal` field of journal-article records.
+
+    `journal_id` is a stable in-memory key (the slug of the full name); it does
+    not change when a nickname is set. The on-disk file stem, however, is the
+    nickname when one is set, else the slug (see `Workspace.journal_path_for`).
+    Only `starred`, `nickname`, and `jflags` are user-editable; `name` is the
+    verbatim journal title as it appears in the BibTeX.
+    """
+
+    journal_id: str           # slug of the full name (stable key)
+    name: str                 # full journal title, verbatim
+    nickname: str = ""        # optional short label, e.g. "JBIB"
+    starred: bool = False
+    jflags: list[str] = field(default_factory=list)
+    path: str = ""            # journals/<nickname-or-slug>.yml
+    # populated at load time, not persisted:
+    record_ids: list[str] = field(default_factory=list)
+
+    @property
+    def display_name(self) -> str:
+        return self.name
+
+    def sorted_jflags(self) -> list[str]:
+        """J-Flags de-duplicated and stored in alphabetical order (the on-disk
+        canonical form). Display ordering by priority is a UI concern handled
+        elsewhere."""
+        seen = set()
+        unique = []
+        for f in self.jflags:
+            f = str(f).strip()
+            if f and f not in seen:
+                seen.add(f)
+                unique.append(f)
+        return sorted(unique, key=str.lower)
+
+    def to_yaml_dict(self) -> dict:
+        data: dict = {"name": self.name}
+        if self.nickname:
+            data["nickname"] = self.nickname
+        data["starred"] = bool(self.starred)
+        data["jflags"] = self.sorted_jflags()
+        return data
+
+    def save(self) -> None:
+        # keep the in-memory list canonicalised too
+        self.jflags = self.sorted_jflags()
+        p = Path(self.path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        text = yaml.safe_dump(self.to_yaml_dict(), sort_keys=False,
+                              allow_unicode=True)
+        tmp = p.with_suffix(p.suffix + ".tmp")
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, p)
+
+
 class Workspace:
     def __init__(self, root: str | Path):
         self.root = Path(root)
         self.records: dict[str, Record] = {}
         self.my_works: dict[str, MyWork] = {}
         self.authors: dict[str, Author] = {}
+        self.journals: dict[str, Journal] = {}
         self._doi_index: dict[str, str] = {}  # doi(lower) -> bibliotheca_id
         # author_id -> list of bibliotheca_ids
         self._author_records: dict[str, list[str]] = {}
+        # journal_id -> list of bibliotheca_ids
+        self._journal_records: dict[str, list[str]] = {}
 
     # --- paths -----------------------------------------------------------
     @property
@@ -310,6 +371,10 @@ class Workspace:
         return self.root / "authors"
 
     @property
+    def journals_dir(self) -> Path:
+        return self.root / "journals"
+
+    @property
     def index_path(self) -> Path:
         return self.root / INDEX_FILENAME
 
@@ -325,6 +390,14 @@ class Workspace:
         return self.bibtex_dir / self._shard(bibliotheca_id) / \
             f"{bibliotheca_id}.bib"
 
+    def journal_path_for(self, journal: "Journal") -> Path:
+        """The on-disk .yml path for a journal: the nickname when set,
+        otherwise the slug of the full name."""
+        stem = _sanitise_stem(journal.nickname) if journal.nickname \
+            else journal.journal_id
+        stem = stem or "journal"
+        return self.journals_dir / f"{stem}.yml"
+
     # --- validation ------------------------------------------------------
     @staticmethod
     def looks_like_workspace(root: str | Path) -> bool:
@@ -337,11 +410,13 @@ class Workspace:
             self._load_my_works()
             self._build_doi_index()
             self._derive_authors()
+            self._derive_journals()
             return
         self._scan()
         self._load_my_works()
         self._build_doi_index()
         self._derive_authors()
+        self._derive_journals()
         self._save_index()
 
     def _scan(self) -> None:
@@ -571,6 +646,149 @@ class Workspace:
         if not author.path:
             author.path = str(self.authors_dir / f"{author_id}.yml")
         author.save()
+
+    # --- journals --------------------------------------------------------
+    def _load_journal_files(self) -> dict[str, Journal]:
+        """Load persisted journal records (journal_id -> Journal), if any.
+
+        The journal_id is always recomputed from the stored full `name` so it
+        stays stable regardless of the file stem (which follows the nickname).
+        """
+        loaded: dict[str, Journal] = {}
+        d = self.journals_dir
+        if not d.is_dir():
+            return loaded
+        for f in sorted(d.glob("*.yml")) + sorted(d.glob("*.yaml")):
+            try:
+                data = yaml.safe_load(f.read_text(encoding="utf-8")) or {}
+            except (OSError, yaml.YAMLError):
+                data = {}
+            if not isinstance(data, dict):
+                continue
+            name = str(data.get("name", "")).strip()
+            if not name:
+                continue
+            jid = slugify_journal(name)
+            if not jid:
+                continue
+            jflags = data.get("jflags") or []
+            if not isinstance(jflags, list):
+                jflags = []
+            loaded[jid] = Journal(
+                journal_id=jid,
+                name=name,
+                nickname=str(data.get("nickname", "")).strip(),
+                starred=bool(data.get("starred", False)),
+                jflags=[str(x) for x in jflags],
+                path=str(f),
+            )
+        return loaded
+
+    def _derive_journals(self) -> None:
+        """Derive unique journals from journal-article records, merge with
+        persisted files, persist any newly-discovered journals, and build the
+        journal->records index. Starred/nickname/jflags state is preserved.
+
+        Only records whose type is 'Journal article' contribute a journal, so
+        book-chapter booktitles never appear here.
+        """
+        persisted = self._load_journal_files()
+        self.journals = {}
+        self._journal_records = {}
+
+        for bid, rec in self.records.items():
+            if rec.type_label != "Journal article":
+                continue
+            name = (rec.journal or "").strip()
+            if not name:
+                continue
+            jid = slugify_journal(name)
+            if not jid:
+                continue
+            if jid not in self.journals:
+                existing = persisted.get(jid)
+                if existing is not None:
+                    journal = existing
+                    # keep the display name in sync with the current BibTeX
+                    journal.name = name
+                else:
+                    journal = Journal(journal_id=jid, name=name)
+                    journal.path = str(self.journal_path_for(journal))
+                self.journals[jid] = journal
+                self._journal_records[jid] = []
+            self._journal_records[jid].append(bid)
+
+        # persist any journals that do not yet have a file on disk
+        for jid, journal in self.journals.items():
+            if not journal.path:
+                journal.path = str(self.journal_path_for(journal))
+            if not Path(journal.path).exists():
+                try:
+                    journal.save()
+                except OSError:
+                    pass
+            journal.record_ids = sorted(self._journal_records.get(jid, []),
+                                        key=str.lower)
+
+    def all_journals(self) -> list[Journal]:
+        return sorted(self.journals.values(),
+                      key=lambda j: j.name.lower())
+
+    def starred_journals(self) -> list[Journal]:
+        return [j for j in self.all_journals() if j.starred]
+
+    def set_journal_starred(self, journal_id: str, starred: bool) -> None:
+        journal = self.journals.get(journal_id)
+        if not journal:
+            return
+        journal.starred = bool(starred)
+        if not journal.path:
+            journal.path = str(self.journal_path_for(journal))
+        journal.save()
+
+    def set_journal_jflags(self, journal_id: str, jflags: list[str]) -> None:
+        journal = self.journals.get(journal_id)
+        if not journal:
+            return
+        journal.jflags = [str(f) for f in (jflags or [])]
+        if not journal.path:
+            journal.path = str(self.journal_path_for(journal))
+        journal.save()
+
+    def set_journal_nickname(self, journal_id: str, nickname: str) -> None:
+        """Set (or clear) a journal's nickname, renaming its .yml file to the
+        nickname (or back to the slug when cleared)."""
+        journal = self.journals.get(journal_id)
+        if not journal:
+            return
+        nickname = (nickname or "").strip()
+        old_path = Path(journal.path) if journal.path else None
+        journal.nickname = nickname
+        new_path = self.journal_path_for(journal)
+        # Write the new file first, then remove the stale one if it differs.
+        journal.path = str(new_path)
+        journal.save()
+        if old_path and old_path.exists() and \
+                old_path.resolve() != new_path.resolve():
+            try:
+                old_path.unlink()
+            except OSError:
+                pass
+
+    def journal_for_record(self, rec: "Record") -> Journal | None:
+        """Return the Journal a record belongs to, or None when the record is
+        not a journal article (or its journal is unknown)."""
+        if rec.type_label != "Journal article":
+            return None
+        name = (rec.journal or "").strip()
+        if not name:
+            return None
+        return self.journals.get(slugify_journal(name))
+
+    def records_for_journal(self, journal_id: str) -> list["Record"]:
+        ids = self._journal_records.get(journal_id, [])
+        recs = [self.records[i] for i in ids if i in self.records]
+        return sorted(recs, key=lambda r: r.bibliotheca_id.lower())
 
     def records_for_author(self, author_id: str) -> list["Record"]:
         ids = self._author_records.get(author_id, [])
@@ -894,6 +1112,30 @@ def _sanitise_id(text: str) -> str:
     text = re.sub(r"\s+", "_", text)
     text = _ID_ALLOWED_RE.sub("", text)
     return text.strip("_-")
+
+
+def _sanitise_stem(text: str) -> str:
+    """Turn arbitrary text into a safe file stem, preserving case.
+
+    Used for journal nickname filenames ("JBIB" -> "JBIB.yml"). Spaces become
+    hyphens; characters outside [A-Za-z0-9_-] are dropped.
+    """
+    text = (text or "").strip()
+    text = re.sub(r"\s+", "-", text)
+    text = _ID_ALLOWED_RE.sub("", text)
+    return text.strip("-_")
+
+
+def slugify_journal(name: str) -> str:
+    """Slugify a journal name to a stable, lowercase, hyphen-joined id.
+
+    "Journal of Bibliotheca" -> "journal-of-bibliotheca"
+
+    Returns '' if nothing usable remains.
+    """
+    text = (name or "").strip().lower()
+    text = re.sub(r"[^a-z0-9]+", "-", text)
+    return text.strip("-")
 
 
 def make_author_id(surname: str, given_names: str) -> str:
