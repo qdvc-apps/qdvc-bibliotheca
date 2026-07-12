@@ -22,6 +22,7 @@ from ..catalogue_sort import (  # noqa: E402
     count_label as _count_label,
     order_jflags as _order_jflags,
     markup_to_html as _markup_to_html,
+    APA_STYLE_ID,
 )
 
 
@@ -35,9 +36,6 @@ NODE_OUTLET = "outlet"
 NODE_FULLTEXT = "fulltext"   # key in {"pdf","epub","none"}
 NODE_DOI = "doi"             # key in {"set","unset"}
 NODE_TEMP = "temp"  # transient "query results" node at the bottom
-
-# Sentinel id for the built-in APA renderer in the citation-style dropdown.
-APA_STYLE_ID = "__apa__"
 
 
 class CatalogueTab(Gtk.Box):

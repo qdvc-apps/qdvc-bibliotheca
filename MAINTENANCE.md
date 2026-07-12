@@ -39,14 +39,21 @@ reading happen per-record, on demand.
 ## 2. Runtime requirements
 
 - Python 3.10+ (uses `str | None` union syntax and `list[...]` generics).
-- PyGObject + GTK 3 (`gi`, `gi.repository.Gtk` version "3.0").
+- PyGObject, and **one** of the two UI toolkits:
+  - GTK 3 (`gi.repository.Gtk` version "3.0") for the default front-end, or
+  - GTK 4 + libadwaita (`gi.repository.Gtk` "4.0" and `gi.repository.Adw` "1";
+    Debian/Ubuntu package `gir1.2-adw-1`) for the GTK4 front-end.
 - PyYAML (hard dependency).
 - `bibtexparser` (optional; a built-in fallback parser is used when absent).
 - `citeproc-py` (optional; enables the CSL citation-style renderer in `csl.py`.
   Absent, the citation-style dropdown offers only the built-in APA renderer).
 
-GTK 4 is **not** supported. Several deprecated-in-GTK4 idioms are used
-deliberately (see §8).
+Both front-ends exist in the tree and share the same pure core. The toolkit is
+chosen at launch (see §3.3): the `ui_backend` config key (default `gtk3`), or a
+`--gtk3` / `--gtk4` CLI flag. The GTK3 UI intentionally uses some
+deprecated-in-GTK4 idioms (see §8); the GTK4 UI follows the GNOME HIG. For an
+element-by-element comparison of the two view layers, see
+[MAINTENANCE_GTK3_GTK4.md](MAINTENANCE_GTK3_GTK4.md).
 
 ---
 
@@ -55,10 +62,13 @@ deliberately (see §8).
 ### 3.1 Source tree
 
 ```
-qdvc-bibliotheca.py        Launcher shim (imports qdvc.gtk3.gtk3_app:main).
+qdvc-bibliotheca.py        Launcher / backend dispatcher (see §3.3): picks
+                           gtk3 or gtk4 before importing any GTK, then calls
+                           the chosen front-end's main().
 qdvc/                       PURE package — no GTK imports anywhere here.
     __init__.py            Version + app constants (APP_ID, APP_NAME, __version__).
-    config.py              Config: load/save YAML at the XDG config location.
+    config.py              Config: load/save YAML at the XDG config location
+                           (incl. the validated ui_backend accessor).
     workspace.py           MODEL aggregate. The Workspace class + INDEX_*.
                            Re-exports the names below for backward compat.
     models.py              Record, MyWork, Author, Outlet dataclasses.
@@ -67,7 +77,12 @@ qdvc/                       PURE package — no GTK imports anywhere here.
     naming.py              id / slug / nickname / DOI helpers.
     apa.py                 BibTeX-entry -> APA 7 formatter (markup + plain).
     csl.py                 Optional CSL renderer (via citeproc-py) + fallback.
-    catalogue_sort.py      Pure sort-keys, count/label + J-Flag ordering helpers.
+    catalogue_sort.py      Pure sort-keys, count/label + J-Flag ordering helpers,
+                           and the APA_STYLE_ID sentinel.
+    ui_prefs.py            Pure, toolkit-independent helpers shared by BOTH
+                           front-ends: J-Flag presets/priority, sort-spec
+                           load/save + describe, citation-style get/store,
+                           validation-report formatting, the shortcuts table.
     platform_utils.py      Launch system apps (viewer, editor, file manager).
     gtk3/                  GTK3 front-end sub-package — all modules gtk3_*.
         __init__.py        Package marker + porting note.
@@ -77,21 +92,45 @@ qdvc/                       PURE package — no GTK imports anywhere here.
         gtk3_authors_tab.py    Authors tab (list + star toggles).
         gtk3_outlets_tab.py    Outlets tab (list + star + nickname + J-Flags).
         gtk3_doi_tab.py        DOI lookup tab.
-        gtk3_preferences.py    Preferences dialog.
+        gtk3_preferences.py    Preferences dialog (incl. the backend selector).
         gtk3_myworks_editor.py Dialog to edit a "my work" (cites + published_as).
         gtk3_sort_dialog.py    Dialog to build a multi-key sort specification.
         gtk3_allocate_dialog.py Dialog to allocate record(s) to works.
         gtk3_md_highlight.py   Regex Markdown highlighter for the notes buffer.
         gtk3_widgets.py    Shared GTK3 helpers: icon menu item, Pango style
                            enums, rich-text clipboard setter.
+    gtk4/                 GTK4 / libadwaita front-end sub-package — all gtk4_*.
+        __init__.py        Package doc.
+        gtk4_app.py        Adw.Application; registers accelerators (win.* scope).
+        gtk4_window.py     BibliothecaWindow (Adw.ViewStack + header bar +
+                           primary menu); shares helpers via ui_prefs.
+        gtk4_actions.py    ActionsMixin: installs the win.* Gio.SimpleActions.
+        gtk4_headerbar.py  HeaderBarMixin: header bars, primary menu, switcher.
+        gtk4_common.py     Row GObjects (RecordItem, NavItem, TextItem) + the
+                           shared NODE_* constants; re-exports APA_STYLE_ID.
+        gtk4_dialogs.py    Async dialog helpers (message/confirm/prompt/choose/
+                           text-report) — the "no run()" layer.
+        gtk4_catalogue_tab.py  Adw.OverlaySplitView + Gtk.ColumnView Catalogue.
+        gtk4_authors_tab.py    Authors ColumnView.
+        gtk4_outlets_tab.py    Outlets ColumnView (+ nickname / J-Flags dialogs).
+        gtk4_doi_tab.py        DOI lookup view.
+        gtk4_widgets.py    Shared ColumnView column factories (text/icon/star).
+        gtk4_import_dialog.py  Import BibTeX (Adw.Window; on_import callback).
+        gtk4_sort_dialog.py    Multi-key sort (on_apply / on_clear callbacks).
+        gtk4_allocate_dialog.py Allocate to works (on_done callback).
+        gtk4_myworks_editor.py Two-list work editor (on_apply callback).
+        gtk4_preferences.py    Adw.PreferencesWindow (live-apply + selector).
+        gtk4_shortcuts.py      Shortcuts window (from ui_prefs.SHORTCUTS).
+        gtk4_md_highlight.py   Markdown highlighter (GTK4 copy of the gtk3 one).
 ```
 
-**Pure vs. GTK3 rule of thumb.** If a module imports `gi`, it belongs in
-`qdvc/gtk3/` and is named `gtk3_*`. If it doesn't, it stays in the top-level
-`qdvc/` package. Intra-package imports follow from this: GTK3 modules reach
-pure modules with `from ..` (e.g. `from ..workspace import Workspace`,
-`from ..catalogue_sort import SORT_KEYS`) and reach their GTK3 siblings with
-`from .gtk3_x import …`.
+**Pure vs. front-end rule of thumb.** If a module imports `gi`, it belongs in a
+front-end sub-package (`qdvc/gtk3/` named `gtk3_*`, or `qdvc/gtk4/` named
+`gtk4_*`). If it doesn't, it stays in the top-level `qdvc/` package. Intra-package
+imports follow from this: front-end modules reach pure modules with `from ..`
+(e.g. `from ..workspace import Workspace`, `from .. import ui_prefs`) and reach
+their siblings with `from .gtk3_x` / `from .gtk4_x`. The two front-ends never
+import each other.
 
 **Backward-compatible re-exports.** `workspace.py` was split into `models.py`,
 `bibtex.py`, `markdown_io.py`, and `naming.py`, but it still imports and
@@ -100,6 +139,16 @@ aliases (`_sanitise_id`, `_id_suffix`, `_sanitise_stem`, `_normalise_doi`,
 `_split_bib_entries`, `_parse_bib_fallback`) — so existing imports such as
 `from qdvc.workspace import Workspace, slugify_outlet, Record` keep working
 unchanged.
+
+### 3.3 Backend selection (dispatcher)
+
+`qdvc-bibliotheca.py` chooses the UI toolkit **before importing any GTK**, so
+only the selected front-end is loaded. Priority: a `--gtk3` / `--gtk4` CLI flag;
+then `Config.ui_backend`; then the default `gtk3`. It preserves `argv[0]` for
+GApplication and, if the GTK4 import fails (e.g. libadwaita absent), prints a
+note to stderr and falls back to GTK3. The selector is written from either UI's
+Preferences and takes effect on the next launch. `Config.ui_backend` validates
+and lower-cases the value, falling back to `gtk3` for anything unrecognised.
 
 ### 3.2 Workspace on disk
 
@@ -778,9 +827,17 @@ placeholder, not a crash).
   name — alias on import (`from ..x import y as _y`) so the GTK class body is
   unchanged. This is exactly how `catalogue_sort.py`, `naming.py`, and the
   `models`/`bibtex`/`markdown_io` split were done.
-- **Start a GTK4 port** → create a sibling `qdvc/gtk4/` package with `gtk4_`
-  modules that reuse the entire pure layer unchanged; add a launcher entry
-  pointing at `qdvc.gtk4.gtk4_app:main`. No pure module should need edits.
+- **Work on the GTK4 UI** → it lives in `qdvc/gtk4/` (all `gtk4_*`), reuses the
+  entire pure layer unchanged, and follows the GNOME HIG. The launcher already
+  dispatches to `qdvc.gtk4.gtk4_app:main` when `ui_backend`/`--gtk4` selects it.
+  For the GTK3↔GTK4 element map (which widget replaces which, and why), see
+  [MAINTENANCE_GTK3_GTK4.md](MAINTENANCE_GTK3_GTK4.md).
+- **Add a UI feature to both front-ends** → implement the view change in the
+  matching `gtk3_*` and `gtk4_*` module, and put any toolkit-independent
+  logic (config reads, formatting, spec parsing) in `ui_prefs.py` so both call
+  one implementation. If a command is involved, add it to the GTK3 menu/toolbar
+  *and* install a `win.*` `Gio.SimpleAction` in `gtk4_actions` (referencing it
+  by name from the menu/header).
 
 ---
 
@@ -838,21 +895,38 @@ Keywords=bibliography;references;bibtex;citations;research;
 
 ## 12. Persisted state (config keys)
 
-Beyond the §4.6 list, note `sort_spec` — the multi-key sort, stored as
-`[[field_id, ascending_bool], ...]` and round-tripped by
-`MainWindow._load_sort_spec` / `_save_sort_spec`. It is applied to the
-Catalogue in `_apply_prefs_to_widgets` at startup (before any workspace is
-open, which is fine — it's applied again on populate) and saved whenever the
-Sort dialog is accepted or cleared. Unknown field ids load harmlessly:
-`_sorted_records` skips any key absent from `SORT_KEYS`.
+Beyond the §4.6 list:
+
+- `sort_spec` — the multi-key sort, stored as `[[field_id, ascending_bool],
+  ...]` and round-tripped by the shared `ui_prefs.load_sort_spec` /
+  `save_sort_spec`. It is applied to the Catalogue in `_apply_prefs_to_widgets`
+  at startup (before any workspace is open, which is fine — it's applied again
+  on populate) and saved whenever the Sort dialog is accepted or cleared.
+  Unknown field ids load harmlessly: `_sorted_records` skips any key absent from
+  `SORT_KEYS`.
+- `csl_styles` — a `{workspace_root_path: style_id}` map persisting the chosen
+  citation style per workspace (`style_id` is the `APA_STYLE_ID` sentinel or a
+  CSL filename), read/written by `ui_prefs.saved_citation_style` /
+  `store_citation_style` in both front-ends.
+- `ui_backend` — `"gtk3"` (default) or `"gtk4"`, chosen from either UI's
+  Preferences and read by the launcher (§3.3). `Config.ui_backend` validates it.
+
+The reusable, toolkit-independent readers/formatters for these (J-Flag presets,
+sort spec, citation style, and the validation-report text) live in the pure
+`ui_prefs.py` so the GTK3 and GTK4 windows share one implementation.
 
 ---
 
 ## 13. Known constraints & gotchas
 
-- **GTK 3 only.** A GTK 4 port would need: `ImageMenuItem` replacement (already
-  done), `Gtk.Toolbar` (removed in 4), `override_font` (removed), and the
-  clipboard API (rewritten around `Gdk.Clipboard`).
+- **Two front-ends.** The GTK3 UI (`qdvc/gtk3/`) is the default; a full GTK4 /
+  libadwaita UI (`qdvc/gtk4/`) is selectable via `ui_backend` or `--gtk4`. The
+  GTK3 UI deliberately uses some deprecated-in-GTK4 idioms (`Gtk.Toolbar`,
+  `override_font`, the `Gtk.Clipboard` owner trick); the GTK4 UI replaces each
+  with its modern equivalent (header bars, `MarkdownHighlighter` font tag,
+  `Gdk.ContentProvider`). When adding a UI feature, add it to **both** front-ends
+  (or deliberately note why not) and keep any toolkit-independent logic in
+  `ui_prefs.py`. See [MAINTENANCE_GTK3_GTK4.md](MAINTENANCE_GTK3_GTK4.md).
 - **`WM_CLASS` / panel icon**: the app sets a standard themed icon
   (`accessories-dictionary`) as both the default and per-window icon, so the
   window/taskbar icon renders without any icon file being installed. The MATE

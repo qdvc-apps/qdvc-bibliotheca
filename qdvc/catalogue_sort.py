@@ -14,6 +14,11 @@ def year_key(r):
     return (int(digits) if digits else 0, y.lower())
 
 
+# Sentinel id for the built-in APA renderer in the citation-style dropdown.
+# Lives here (pure) so both front-ends and ui_prefs share one definition.
+APA_STYLE_ID = "__apa__"
+
+
 # Multi-key sort: maps a stable sort-key id to a callable producing a
 # comparison key from a Record. Order of this dict is the order shown to the
 # user in the sort dialog.

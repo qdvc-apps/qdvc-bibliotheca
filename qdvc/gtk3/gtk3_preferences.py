@@ -102,6 +102,20 @@ class PreferencesDialog(Gtk.Dialog):
             config.get("toolbar_style", "beside"))
         grid.attach(self.toolbar_combo, 1, 5, 1, 1)
 
+        # UI toolkit backend (GTK3 / GTK4). Changing it takes effect on the
+        # next launch, since the toolkit is chosen before any GTK is imported.
+        grid.attach(_right("Interface (needs restart):"), 0, 6, 1, 1)
+        self.backend_combo = Gtk.ComboBoxText()
+        self._backends = [("gtk3", "GTK 3 (classic)"),
+                          ("gtk4", "GTK 4 (libadwaita)")]
+        for backend_id, label in self._backends:
+            self.backend_combo.append(backend_id, label)
+        self.backend_combo.set_active_id(config.ui_backend)
+        self.backend_combo.set_tooltip_text(
+            "Which UI toolkit to use. Takes effect after you restart the "
+            "application.")
+        grid.attach(self.backend_combo, 1, 6, 1, 1)
+
         return grid
 
     # ------------------------------------------------------------------
@@ -274,6 +288,7 @@ class PreferencesDialog(Gtk.Dialog):
         self.config.set("autosave_notes", self.autosave_check.get_active())
         self.config.set("toolbar_style",
                         self.toolbar_combo.get_active_id() or "beside")
+        self.config.ui_backend = self.backend_combo.get_active_id() or "gtk3"
         jflags = []
         for row in self.jflags_store:
             flag = (row[0] or "").strip()

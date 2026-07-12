@@ -2,7 +2,8 @@
 
 A desktop app for academics — researchers, scholars, students — to manage a
 personal collection of articles, papers, and books. Built with Python 3 and
-GTK 3.
+GTK, with a choice of two interfaces: a classic **GTK 3** UI (the default) and a
+modern **GTK 4 / libadwaita** UI.
 
 Your library lives as plain files on disk: an authoritative BibTeX file per
 work (the reference data, exactly as it comes from the publisher) alongside a
@@ -45,7 +46,9 @@ Git or Syncthing.
 ## Requirements
 
 - Python 3.10+
-- PyGObject with GTK 3 (`python3-gi`, `gir1.2-gtk-3.0`)
+- PyGObject, plus **one** of the two toolkits:
+  - GTK 3 (`python3-gi`, `gir1.2-gtk-3.0`) — the default interface, or
+  - GTK 4 + libadwaita (`gir1.2-gtk-4.0`, `gir1.2-adw-1`) — the modern interface
 - PyYAML
 - `bibtexparser` (optional — a built-in fallback parser is used if it's absent)
 - `citeproc-py` (optional — enables rendering references with custom CSL
@@ -54,13 +57,26 @@ Git or Syncthing.
 ## Install & run
 
 ```sh
-# Debian/Ubuntu
+# Debian/Ubuntu — GTK 3 (default)
 sudo apt install python3-gi gir1.2-gtk-3.0 python3-yaml
 pip install bibtexparser   # optional
 pip install citeproc-py    # optional (custom CSL citation styles)
 
 python3 qdvc-bibliotheca.py
 ```
+
+To use the GTK 4 / libadwaita interface, also install its runtime and either
+pass `--gtk4` or set the interface in Preferences (it takes effect on the next
+launch):
+
+```sh
+sudo apt install gir1.2-gtk-4.0 gir1.2-adw-1
+
+python3 qdvc-bibliotheca.py --gtk4    # or --gtk3 to force the classic UI
+```
+
+The chosen interface is remembered in the config (`ui_backend`); the default is
+GTK 3. Either UI's Preferences window can switch to the other.
 
 To add it to your application menu and taskbar, see the desktop-launcher
 instructions in [MAINTENANCE.md](MAINTENANCE.md).
@@ -69,6 +85,8 @@ instructions in [MAINTENANCE.md](MAINTENANCE.md).
 
 - **[MAINTENANCE.md](MAINTENANCE.md)** — architecture, module layout, data
   formats, and guidance for developing and maintaining the codebase.
+- **[MAINTENANCE_GTK3_GTK4.md](MAINTENANCE_GTK3_GTK4.md)** — an element-by-element
+  comparison of the GTK 3 and GTK 4 / libadwaita interfaces.
 
 ## License
 

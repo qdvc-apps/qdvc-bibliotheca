@@ -29,7 +29,11 @@ DEFAULTS = {
     "last_workspace": None,      # str path or None
     "recent_workspaces": [],     # list[str]
     "window": {"width": 1100, "height": 720},
+    "ui_backend": "gtk3",        # "gtk3" (default) or "gtk4"
 }
+
+# Valid UI backends the launcher can dispatch to.
+UI_BACKENDS = ("gtk3", "gtk4")
 
 
 class Config:
@@ -85,6 +89,21 @@ class Config:
     @property
     def window(self) -> dict:
         return self._data.setdefault("window", {"width": 1100, "height": 720})
+
+    @property
+    def ui_backend(self) -> str:
+        """The selected UI toolkit backend, normalised to a valid value.
+
+        Anything unrecognised (or unset) falls back to the default, "gtk3", so
+        a corrupt or hand-edited config can never leave the launcher without a
+        backend to dispatch to."""
+        value = str(self._data.get("ui_backend", "gtk3") or "gtk3").lower()
+        return value if value in UI_BACKENDS else "gtk3"
+
+    @ui_backend.setter
+    def ui_backend(self, value):
+        value = str(value or "").lower()
+        self._data["ui_backend"] = value if value in UI_BACKENDS else "gtk3"
 
     def get(self, key, default=None):
         return self._data.get(key, default)
