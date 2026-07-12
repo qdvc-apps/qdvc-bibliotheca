@@ -19,7 +19,7 @@ NODE_TYPE = "type"
 NODE_WORK = "work"
 NODE_WORKS_ROOT = "works_root"
 NODE_AUTHOR = "author"
-NODE_JOURNAL = "journal"
+NODE_OUTLET = "outlet"
 NODE_FULLTEXT = "fulltext"   # key in {"pdf","epub","none"}
 NODE_DOI = "doi"             # key in {"set","unset"}
 NODE_TEMP = "temp"  # transient "query results" node at the bottom
@@ -67,8 +67,8 @@ class CatalogueTab(Gtk.Box):
         # emitted (action_name) for record context-menu actions the main
         # window handles (reveal/edit/open/rename) against the current record
         "record-action": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
-        # emitted (journal_id) to jump to a record's journal in the Journals tab
-        "goto-journal": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
+        # emitted (outlet_id) to jump to a record's outlet in the Outlets tab
+        "goto-outlet": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
     }
 
     def __init__(self):
@@ -226,16 +226,16 @@ class CatalogueTab(Gtk.Box):
                                    NODE_AUTHOR, a.author_id, n,
                                    clabel(len(a.record_ids))])
 
-        starred_journals_root = self.side_store.append(
-            None, ["starred", "Starred journals", "", "", n, ""])
+        starred_outlets_root = self.side_store.append(
+            None, ["starred", "Starred outlets", "", "", n, ""])
         if self.workspace:
-            for j in self.workspace.starred_journals():
+            for j in self.workspace.starred_outlets():
                 # Show the nickname where one is set, else the full name.
                 label = j.nickname or j.display_name
                 self.side_store.append(
-                    starred_journals_root, ["starred", label,
-                                            NODE_JOURNAL, j.journal_id, n,
-                                            clabel(len(j.record_ids))])
+                    starred_outlets_root, ["starred", label,
+                                           NODE_OUTLET, j.outlet_id, n,
+                                           clabel(len(j.record_ids))])
 
         # transient "query results" node pinned at the very bottom
         if temp_author_id and self.workspace:
@@ -335,9 +335,9 @@ class CatalogueTab(Gtk.Box):
         elif kind in (NODE_AUTHOR, NODE_TEMP):
             self._active_filter = (kind, key)
             self._populate_master(self.workspace.records_for_author(key))
-        elif kind == NODE_JOURNAL:
-            self._active_filter = (NODE_JOURNAL, key)
-            self._populate_master(self.workspace.records_for_journal(key))
+        elif kind == NODE_OUTLET:
+            self._active_filter = (NODE_OUTLET, key)
+            self._populate_master(self.workspace.records_for_outlet(key))
 
     def _on_sidebar_activated(self, _view, path, _col):
         it = self.side_store.get_iter(path)
@@ -511,29 +511,29 @@ class CatalogueTab(Gtk.Box):
                 r.type_label]
 
     def _outlet_markup(self, r):
-        """Pango markup for the Outlet cell. For a journal article whose
-        journal has a nickname, preface the full name with the nickname in
-        bold brackets, e.g. '<b>(JBIB)</b> Journal of Bibliotheca'. Otherwise
-        just the escaped outlet text."""
+        """Pango markup for the Outlet cell. For a record whose outlet
+        (journal or proceedings) has a nickname, preface the full name with the
+        nickname in bold brackets, e.g. '<b>(JBIB)</b> Journal of Bibliotheca'.
+        Otherwise just the escaped outlet text."""
         from html import escape
-        outlet = r.outlet or "\u2014"
-        journal = None
+        outlet_text = r.outlet or "\u2014"
+        outlet = None
         if self.workspace:
-            journal = self.workspace.journal_for_record(r)
-        if journal and journal.nickname:
-            return (f"<b>({escape(journal.nickname)})</b> "
-                    f"{escape(journal.name)}")
-        return escape(outlet)
+            outlet = self.workspace.outlet_for_record(r)
+        if outlet and outlet.nickname:
+            return (f"<b>({escape(outlet.nickname)})</b> "
+                    f"{escape(outlet.name)}")
+        return escape(outlet_text)
 
     def _jflags_display(self, r):
-        """The J-Flags cell text: the journal's flags ordered by their
+        """The J-Flags cell text: the outlet's flags ordered by their
         configured priority, comma-separated (e.g. 'FT50, A*'). An em dash when
-        the record is not a journal article or the journal has no flags."""
-        journal = self.workspace.journal_for_record(r) if self.workspace \
+        the record has no outlet or the outlet has no flags."""
+        outlet = self.workspace.outlet_for_record(r) if self.workspace \
             else None
-        if not journal or not journal.jflags:
+        if not outlet or not outlet.jflags:
             return "\u2014"
-        ordered = _order_jflags(journal.sorted_jflags(), self._jflag_priority)
+        ordered = _order_jflags(outlet.sorted_jflags(), self._jflag_priority)
         return ", ".join(ordered) if ordered else "\u2014"
 
     def _populate_master(self, records):
@@ -902,17 +902,17 @@ class CatalogueTab(Gtk.Box):
 
         menu.append(Gtk.SeparatorMenuItem())
 
-        # Go to journal (only for journal articles with a known journal).
-        journal = self.workspace.journal_for_record(rec) if self.workspace \
+        # Go to outlet (only for records with a known outlet).
+        outlet = self.workspace.outlet_for_record(rec) if self.workspace \
             else None
-        mi_journal = _img_menu_item("Go to journal", "starred")
-        if journal:
-            jid = journal.journal_id
-            mi_journal.connect(
-                "activate", lambda *_: self.emit("goto-journal", jid))
+        mi_outlet = _img_menu_item("Go to outlet", "starred")
+        if outlet:
+            oid = outlet.outlet_id
+            mi_outlet.connect(
+                "activate", lambda *_: self.emit("goto-outlet", oid))
         else:
-            mi_journal.set_sensitive(False)
-        menu.append(mi_journal)
+            mi_outlet.set_sensitive(False)
+        menu.append(mi_outlet)
 
         menu.append(Gtk.SeparatorMenuItem())
 
@@ -1181,9 +1181,9 @@ class CatalogueTab(Gtk.Box):
         changes made in the Authors tab."""
         self._rebuild_sidebar()
 
-    def refresh_starred_journals(self):
-        """Rebuild the sidebar so the Starred Journals section reflects
-        changes made in the Journals tab, and re-render Pane 2 so J-Flags and
+    def refresh_starred_outlets(self):
+        """Rebuild the sidebar so the Starred Outlets section reflects
+        changes made in the Outlets tab, and re-render Pane 2 so J-Flags and
         nickname changes show immediately."""
         self._rebuild_sidebar()
         self.set_sort_spec(self._sort_spec)
@@ -1244,9 +1244,9 @@ class CatalogueTab(Gtk.Box):
                 return True
         return False
 
-    def show_journal_works(self, journal_id):
-        """Filter the master list to a given journal's articles, jumping from
-        the Journals tab. If the journal is starred it has a sidebar node to
+    def show_outlet_works(self, outlet_id):
+        """Filter the master list to a given outlet's records, jumping from
+        the Outlets tab. If the outlet is starred it has a sidebar node to
         select; otherwise the filter is applied directly."""
         if not self.workspace:
             return
@@ -1255,11 +1255,11 @@ class CatalogueTab(Gtk.Box):
         self._rebuild_sidebar()
         for row in self.side_store:
             for child in row.iterchildren():
-                if child[2] == NODE_JOURNAL and child[3] == journal_id:
+                if child[2] == NODE_OUTLET and child[3] == outlet_id:
                     self.side_view.get_selection().select_iter(child.iter)
                     return
         # not starred (no node): apply the filter directly
-        self._apply_filter(NODE_JOURNAL, journal_id)
+        self._apply_filter(NODE_OUTLET, outlet_id)
 
     def show_work(self, work_key):
         """Select a given 'my work' in the sidebar and filter to it."""

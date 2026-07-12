@@ -13,23 +13,24 @@ Git or Syncthing.
 ## What it does
 
 - **Catalogue** — browse and filter your library in a three-pane view: pick a
-  filter on the left (all works, by type, by full-text availability, by DOI
-  status, by project, or by a starred author or journal — each filter showing
-  the number of matching articles), scan the sortable table in the middle (with
-  a J-Flags column and a nickname-prefaced Outlet), and read the reference —
-  rendered with the built-in APA 7 style or a custom CSL style you pick from a
-  dropdown — alongside your syntax-highlighted Markdown notes on the right. Sort
-  by several keys at once (e.g. Year descending, then Author ascending). Copy
-  references as rich text or plain text in one click. Right-click a record (or
-  press the Menu key) for actions including "Go to journal", which jumps to the
-  Journals tab and highlights that journal.
+  filter on the left (all works, by type — including Proceedings — by full-text
+  availability, by DOI status, by project, or by a starred author or outlet,
+  each filter showing the number of matching articles), scan the sortable table
+  in the middle (with a J-Flags column and a nickname-prefaced Outlet), and read
+  the reference — rendered with the built-in APA 7 style or a custom CSL style
+  you pick from a dropdown — alongside your syntax-highlighted Markdown notes on
+  the right. Sort by several keys at once (e.g. Year descending, then Author
+  ascending). Copy references as rich text or plain text in one click.
+  Right-click a record (or press the Menu key) for actions including "Go to
+  outlet", which jumps to the Outlets tab and highlights that outlet.
 - **Authors** — a list of every author, derived automatically from your
   BibTeX. Star the ones you follow and they become quick filters in the
   Catalogue.
-- **Journals** — a list of every journal, derived automatically from your
-  BibTeX. Star the ones you follow (they become quick filters in the
-  Catalogue), give a journal a short nickname, and tag it with one or more
-  J-Flags (e.g. FT50, A*) chosen from presets you configure in Preferences.
+- **Outlets** — a list of every publication outlet (journals and proceedings),
+  derived automatically from your BibTeX. Star the ones you follow (they become
+  quick filters in the Catalogue), give an outlet a short nickname, and tag it
+  with one or more J-Flags (e.g. FT50, A*) chosen from presets you configure in
+  Preferences.
 - **DOI lookup** — paste a DOI and jump straight to the matching record.
 - **My works** — track your own papers/projects and which references each one
   cites. Allocate any record to one or more works straight from its right-click

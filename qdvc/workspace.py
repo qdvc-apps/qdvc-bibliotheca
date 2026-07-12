@@ -24,7 +24,7 @@ import yaml
 from . import apa
 
 INDEX_FILENAME = ".qdvc-index.json"
-INDEX_VERSION = 3
+INDEX_VERSION = 4
 
 _BIB_ENTRY_RE = re.compile(r"@(\w+)\s*\{", re.IGNORECASE)
 _FIELD_RE = re.compile(r"(\w+)\s*=\s*", re.IGNORECASE)
@@ -286,22 +286,23 @@ class Author:
 
 
 @dataclass
-class Journal:
-    """A journal derived from the `journal` field of journal-article records.
+class Outlet:
+    """A publication outlet (journal or proceedings) derived from the outlet
+    field of journal-article and proceedings records.
 
-    `journal_id` is a stable in-memory key (the slug of the full name); it does
+    `outlet_id` is a stable in-memory key (the slug of the full name); it does
     not change when a nickname is set. The on-disk file stem, however, is the
-    nickname when one is set, else the slug (see `Workspace.journal_path_for`).
+    nickname when one is set, else the slug (see `Workspace.outlet_path_for`).
     Only `starred`, `nickname`, and `jflags` are user-editable; `name` is the
-    verbatim journal title as it appears in the BibTeX.
+    verbatim outlet title as it appears in the BibTeX.
     """
 
-    journal_id: str           # slug of the full name (stable key)
-    name: str                 # full journal title, verbatim
+    outlet_id: str            # slug of the full name (stable key)
+    name: str                 # full outlet title, verbatim
     nickname: str = ""        # optional short label, e.g. "JBIB"
     starred: bool = False
     jflags: list[str] = field(default_factory=list)
-    path: str = ""            # journals/<nickname-or-slug>.yml
+    path: str = ""            # outlets/<nickname-or-slug>.yml
     # populated at load time, not persisted:
     record_ids: list[str] = field(default_factory=list)
 
@@ -348,12 +349,12 @@ class Workspace:
         self.records: dict[str, Record] = {}
         self.my_works: dict[str, MyWork] = {}
         self.authors: dict[str, Author] = {}
-        self.journals: dict[str, Journal] = {}
+        self.outlets: dict[str, Outlet] = {}
         self._doi_index: dict[str, str] = {}  # doi(lower) -> bibliotheca_id
         # author_id -> list of bibliotheca_ids
         self._author_records: dict[str, list[str]] = {}
-        # journal_id -> list of bibliotheca_ids
-        self._journal_records: dict[str, list[str]] = {}
+        # outlet_id -> list of bibliotheca_ids
+        self._outlet_records: dict[str, list[str]] = {}
 
     # --- paths -----------------------------------------------------------
     @property
@@ -373,8 +374,8 @@ class Workspace:
         return self.root / "authors"
 
     @property
-    def journals_dir(self) -> Path:
-        return self.root / "journals"
+    def outlets_dir(self) -> Path:
+        return self.root / "outlets"
 
     @property
     def csl_dir(self) -> Path:
@@ -414,13 +415,13 @@ class Workspace:
         return self.bibtex_dir / self._shard(bibliotheca_id) / \
             f"{bibliotheca_id}.bib"
 
-    def journal_path_for(self, journal: "Journal") -> Path:
-        """The on-disk .yml path for a journal: the nickname when set,
+    def outlet_path_for(self, outlet: "Outlet") -> Path:
+        """The on-disk .yml path for an outlet: the nickname when set,
         otherwise the slug of the full name."""
-        stem = _sanitise_stem(journal.nickname) if journal.nickname \
-            else journal.journal_id
-        stem = stem or "journal"
-        return self.journals_dir / f"{stem}.yml"
+        stem = _sanitise_stem(outlet.nickname) if outlet.nickname \
+            else outlet.outlet_id
+        stem = stem or "outlet"
+        return self.outlets_dir / f"{stem}.yml"
 
     # --- validation ------------------------------------------------------
     @staticmethod
@@ -434,13 +435,13 @@ class Workspace:
             self._load_my_works()
             self._build_doi_index()
             self._derive_authors()
-            self._derive_journals()
+            self._derive_outlets()
             return
         self._scan()
         self._load_my_works()
         self._build_doi_index()
         self._derive_authors()
-        self._derive_journals()
+        self._derive_outlets()
         self._save_index()
 
     def _scan(self) -> None:
@@ -672,15 +673,19 @@ class Workspace:
             author.path = str(self.authors_dir / f"{author_id}.yml")
         author.save()
 
-    # --- journals --------------------------------------------------------
-    def _load_journal_files(self) -> dict[str, Journal]:
-        """Load persisted journal records (journal_id -> Journal), if any.
+    # --- outlets ---------------------------------------------------------
+    # The record types that count as a publication "outlet": journal articles
+    # and proceedings. Book chapters, books, webpages, etc. are excluded.
+    OUTLET_TYPES = ("Journal article", "Proceedings")
 
-        The journal_id is always recomputed from the stored full `name` so it
+    def _load_outlet_files(self) -> dict[str, Outlet]:
+        """Load persisted outlet records (outlet_id -> Outlet), if any.
+
+        The outlet_id is always recomputed from the stored full `name` so it
         stays stable regardless of the file stem (which follows the nickname).
         """
-        loaded: dict[str, Journal] = {}
-        d = self.journals_dir
+        loaded: dict[str, Outlet] = {}
+        d = self.outlets_dir
         if not d.is_dir():
             return loaded
         for f in sorted(d.glob("*.yml")) + sorted(d.glob("*.yaml")):
@@ -693,14 +698,14 @@ class Workspace:
             name = str(data.get("name", "")).strip()
             if not name:
                 continue
-            jid = slugify_journal(name)
-            if not jid:
+            oid = slugify_outlet(name)
+            if not oid:
                 continue
             jflags = data.get("jflags") or []
             if not isinstance(jflags, list):
                 jflags = []
-            loaded[jid] = Journal(
-                journal_id=jid,
+            loaded[oid] = Outlet(
+                outlet_id=oid,
                 name=name,
                 nickname=str(data.get("nickname", "")).strip(),
                 starred=bool(data.get("starred", False)),
@@ -709,115 +714,116 @@ class Workspace:
             )
         return loaded
 
-    def _derive_journals(self) -> None:
-        """Derive unique journals from journal-article records, merge with
-        persisted files, persist any newly-discovered journals, and build the
-        journal->records index. Starred/nickname/jflags state is preserved.
+    def _derive_outlets(self) -> None:
+        """Derive unique outlets from journal-article and proceedings records,
+        merge with persisted files, persist any newly-discovered outlets, and
+        build the outlet->records index. Starred/nickname/jflags state is
+        preserved.
 
-        Only records whose type is 'Journal article' contribute a journal, so
+        Only records whose type is in OUTLET_TYPES contribute an outlet, so
         book-chapter booktitles never appear here.
         """
-        persisted = self._load_journal_files()
-        self.journals = {}
-        self._journal_records = {}
+        persisted = self._load_outlet_files()
+        self.outlets = {}
+        self._outlet_records = {}
 
         for bid, rec in self.records.items():
-            if rec.type_label != "Journal article":
+            if rec.type_label not in self.OUTLET_TYPES:
                 continue
             name = (rec.journal or "").strip()
             if not name:
                 continue
-            jid = slugify_journal(name)
-            if not jid:
+            oid = slugify_outlet(name)
+            if not oid:
                 continue
-            if jid not in self.journals:
-                existing = persisted.get(jid)
+            if oid not in self.outlets:
+                existing = persisted.get(oid)
                 if existing is not None:
-                    journal = existing
+                    outlet = existing
                     # keep the display name in sync with the current BibTeX
-                    journal.name = name
+                    outlet.name = name
                 else:
-                    journal = Journal(journal_id=jid, name=name)
-                    journal.path = str(self.journal_path_for(journal))
-                self.journals[jid] = journal
-                self._journal_records[jid] = []
-            self._journal_records[jid].append(bid)
+                    outlet = Outlet(outlet_id=oid, name=name)
+                    outlet.path = str(self.outlet_path_for(outlet))
+                self.outlets[oid] = outlet
+                self._outlet_records[oid] = []
+            self._outlet_records[oid].append(bid)
 
-        # persist any journals that do not yet have a file on disk
-        for jid, journal in self.journals.items():
-            if not journal.path:
-                journal.path = str(self.journal_path_for(journal))
-            if not Path(journal.path).exists():
+        # persist any outlets that do not yet have a file on disk
+        for oid, outlet in self.outlets.items():
+            if not outlet.path:
+                outlet.path = str(self.outlet_path_for(outlet))
+            if not Path(outlet.path).exists():
                 try:
-                    journal.save()
+                    outlet.save()
                 except OSError:
                     pass
-            journal.record_ids = sorted(self._journal_records.get(jid, []),
-                                        key=str.lower)
+            outlet.record_ids = sorted(self._outlet_records.get(oid, []),
+                                       key=str.lower)
 
-    def all_journals(self) -> list[Journal]:
-        return sorted(self.journals.values(),
-                      key=lambda j: j.name.lower())
+    def all_outlets(self) -> list[Outlet]:
+        return sorted(self.outlets.values(),
+                      key=lambda o: o.name.lower())
 
-    def starred_journals(self) -> list[Journal]:
-        return [j for j in self.all_journals() if j.starred]
+    def starred_outlets(self) -> list[Outlet]:
+        return [o for o in self.all_outlets() if o.starred]
 
-    def set_journal_starred(self, journal_id: str, starred: bool) -> None:
-        journal = self.journals.get(journal_id)
-        if not journal:
+    def set_outlet_starred(self, outlet_id: str, starred: bool) -> None:
+        outlet = self.outlets.get(outlet_id)
+        if not outlet:
             return
-        journal.starred = bool(starred)
-        if not journal.path:
-            journal.path = str(self.journal_path_for(journal))
-        journal.save()
+        outlet.starred = bool(starred)
+        if not outlet.path:
+            outlet.path = str(self.outlet_path_for(outlet))
+        outlet.save()
 
-    def set_journal_jflags(self, journal_id: str, jflags: list[str]) -> None:
-        journal = self.journals.get(journal_id)
-        if not journal:
+    def set_outlet_jflags(self, outlet_id: str, jflags: list[str]) -> None:
+        outlet = self.outlets.get(outlet_id)
+        if not outlet:
             return
-        journal.jflags = [str(f) for f in (jflags or [])]
-        if not journal.path:
-            journal.path = str(self.journal_path_for(journal))
-        journal.save()
+        outlet.jflags = [str(f) for f in (jflags or [])]
+        if not outlet.path:
+            outlet.path = str(self.outlet_path_for(outlet))
+        outlet.save()
 
-    def set_journal_nickname(self, journal_id: str, nickname: str) -> None:
-        """Set (or clear) a journal's nickname, renaming its .yml file to the
+    def set_outlet_nickname(self, outlet_id: str, nickname: str) -> None:
+        """Set (or clear) an outlet's nickname, renaming its .yml file to the
         nickname (or back to the slug when cleared).
 
         Raises ValueError if the nickname contains anything other than A-Z/a-z
-        letters, or if it collides with another journal's nickname or that
-        journal's on-disk .yml stem (to prevent YAML filename collisions).
+        letters, or if it collides with another outlet's nickname or that
+        outlet's on-disk .yml stem (to prevent YAML filename collisions).
         """
-        journal = self.journals.get(journal_id)
-        if not journal:
+        outlet = self.outlets.get(outlet_id)
+        if not outlet:
             return
         nickname = (nickname or "").strip()
         if nickname:
-            if not _JOURNAL_NICKNAME_RE.fullmatch(nickname):
+            if not _OUTLET_NICKNAME_RE.fullmatch(nickname):
                 raise ValueError(
                     "A nickname may contain only the letters A-Z and a-z.")
-            # collision check: no other journal may already use this nickname,
-            # and the resulting file stem must not clash with another journal's.
+            # collision check: no other outlet may already use this nickname,
+            # and the resulting file stem must not clash with another outlet's.
             new_stem = nickname.lower()
-            for other_id, other in self.journals.items():
-                if other_id == journal_id:
+            for other_id, other in self.outlets.items():
+                if other_id == outlet_id:
                     continue
                 if other.nickname and other.nickname.lower() == new_stem:
                     raise ValueError(
                         f"The nickname '{nickname}' is already used by "
                         f"'{other.name}'.")
                 other_stem = (_sanitise_stem(other.nickname)
-                              if other.nickname else other.journal_id)
+                              if other.nickname else other.outlet_id)
                 if other_stem.lower() == _sanitise_stem(nickname).lower():
                     raise ValueError(
                         f"The nickname '{nickname}' collides with an existing "
-                        f"journal file.")
-        old_path = Path(journal.path) if journal.path else None
-        journal.nickname = nickname
-        new_path = self.journal_path_for(journal)
+                        f"outlet file.")
+        old_path = Path(outlet.path) if outlet.path else None
+        outlet.nickname = nickname
+        new_path = self.outlet_path_for(outlet)
         # Write the new file first, then remove the stale one if it differs.
-        journal.path = str(new_path)
-        journal.save()
+        outlet.path = str(new_path)
+        outlet.save()
         if old_path and old_path.exists() and \
                 old_path.resolve() != new_path.resolve():
             try:
@@ -825,18 +831,18 @@ class Workspace:
             except OSError:
                 pass
 
-    def journal_for_record(self, rec: "Record") -> Journal | None:
-        """Return the Journal a record belongs to, or None when the record is
-        not a journal article (or its journal is unknown)."""
-        if rec.type_label != "Journal article":
+    def outlet_for_record(self, rec: "Record") -> Outlet | None:
+        """Return the Outlet a record belongs to, or None when the record is
+        not a journal article / proceedings (or its outlet is unknown)."""
+        if rec.type_label not in self.OUTLET_TYPES:
             return None
         name = (rec.journal or "").strip()
         if not name:
             return None
-        return self.journals.get(slugify_journal(name))
+        return self.outlets.get(slugify_outlet(name))
 
-    def records_for_journal(self, journal_id: str) -> list["Record"]:
-        ids = self._journal_records.get(journal_id, [])
+    def records_for_outlet(self, outlet_id: str) -> list["Record"]:
+        ids = self._outlet_records.get(outlet_id, [])
         recs = [self.records[i] for i in ids if i in self.records]
         return sorted(recs, key=lambda r: r.bibliotheca_id.lower())
 
@@ -943,7 +949,7 @@ class Workspace:
         if imported:
             self._build_doi_index()
             self._derive_authors()
-            self._derive_journals()
+            self._derive_outlets()
             self._save_index()
         return imported, skipped_dois
 
@@ -1110,6 +1116,10 @@ class Workspace:
             "dangling_published_as": [],  # (work_name, id)
             "duplicate_dois": [],        # (doi, [ids])
             "key_mismatch": [],          # (bibliotheca_id, bibtex_key)
+            # outlet nickname vs. bibliotheca_id suffix conventions:
+            "nick_set_no_suffix": [],    # (id, nickname) nickname but no suffix
+            "nick_set_suffix_diff": [],  # (id, suffix, nickname) both, differ
+            "suffix_no_nick": [],        # (id, suffix) suffix but no nickname
         }
 
         # BibTeX citation key differs from the Bibliotheca ID (file stem)
@@ -1160,6 +1170,30 @@ class Workspace:
             if len(ids) > 1:
                 report["duplicate_dois"].append((doi, sorted(ids)))
 
+        # outlet nickname vs. bibliotheca_id suffix conventions.
+        # The suffix is the text after the last underscore in the id (the
+        # convention is AuthorSurnamesYear_suffix). Only records that belong
+        # to an outlet (journal article / proceedings) are checked, since only
+        # outlets carry nicknames.
+        for bid, rec in self.records.items():
+            outlet = self.outlet_for_record(rec)
+            if outlet is None:
+                continue
+            suffix = _id_suffix(bid)
+            nickname = (outlet.nickname or "").strip()
+            if nickname:
+                if not suffix:
+                    # (1) nickname set, but the id has no suffix at all
+                    report["nick_set_no_suffix"].append((bid, nickname))
+                elif suffix != nickname:
+                    # (2)/(4) nickname set and id has a suffix, but they differ
+                    report["nick_set_suffix_diff"].append(
+                        (bid, suffix, nickname))
+            else:
+                if suffix:
+                    # (3) id has a suffix, but no outlet nickname is set
+                    report["suffix_no_nick"].append((bid, suffix))
+
         return report
 
 
@@ -1173,8 +1207,8 @@ def _normalise_doi(doi: str | None) -> str:
 
 _ID_ALLOWED_RE = re.compile(r"[^A-Za-z0-9_-]+")
 
-# A journal nickname may contain only ASCII letters (upper/lower A-Z).
-_JOURNAL_NICKNAME_RE = re.compile(r"[A-Za-z]+")
+# An outlet nickname may contain only ASCII letters (upper/lower A-Z).
+_OUTLET_NICKNAME_RE = re.compile(r"[A-Za-z]+")
 
 
 def _sanitise_id(text: str) -> str:
@@ -1186,10 +1220,20 @@ def _sanitise_id(text: str) -> str:
     return text.strip("_-")
 
 
+def _id_suffix(bibliotheca_id: str) -> str:
+    """Return the suffix of a bibliotheca_id, i.e. the text after the last
+    underscore (the convention is ``AuthorSurnamesYear_suffix``). Returns '' if
+    there is no underscore or nothing follows it."""
+    bid = bibliotheca_id or ""
+    if "_" not in bid:
+        return ""
+    return bid.rsplit("_", 1)[1].strip()
+
+
 def _sanitise_stem(text: str) -> str:
     """Turn arbitrary text into a safe file stem, preserving case.
 
-    Used for journal nickname filenames ("JBIB" -> "JBIB.yml"). Spaces become
+    Used for outlet nickname filenames ("JBIB" -> "JBIB.yml"). Spaces become
     hyphens; characters outside [A-Za-z0-9_-] are dropped.
     """
     text = (text or "").strip()
@@ -1198,8 +1242,8 @@ def _sanitise_stem(text: str) -> str:
     return text.strip("-_")
 
 
-def slugify_journal(name: str) -> str:
-    """Slugify a journal name to a stable, lowercase, hyphen-joined id.
+def slugify_outlet(name: str) -> str:
+    """Slugify an outlet name to a stable, lowercase, hyphen-joined id.
 
     "Journal of Bibliotheca" -> "journal-of-bibliotheca"
 

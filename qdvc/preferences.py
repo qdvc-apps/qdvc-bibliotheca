@@ -3,7 +3,7 @@
 The settings are split across tabs in a Gtk.Notebook:
 
   * General  — fonts, file manager, full-text library, startup, toolbar.
-  * J-Flags  — the preset flag/priority table used by the Journals feature.
+  * J-Flags  — the preset flag/priority table used by the Outlets feature.
   * CSL      — lists the custom CSL style files detected in the workspace's
                csl/ folder (by filename). This tab is informational: the
                active style is chosen per-record in the Catalogue's Pane 3.
