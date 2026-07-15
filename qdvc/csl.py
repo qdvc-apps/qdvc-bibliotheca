@@ -17,7 +17,7 @@ handing it to citeproc.
 """
 
 import re
-from html import unescape
+from html import escape, unescape
 
 from . import apa
 
@@ -51,13 +51,27 @@ _CSL_TYPE = {
 }
 
 
+def _markup_safe(value: str) -> str:
+    """Escape the characters that break the downstream Pango markup label.
+
+    citeproc-py's HTML formatter copies text-field values through verbatim
+    without escaping, so a raw ``&``, ``<`` or ``>`` in (say) a journal name
+    reaches ``Gtk.Label.set_markup`` unescaped and makes Pango reject the whole
+    reference. We therefore escape these characters here, *before* the value is
+    handed to citeproc: citeproc then emits well-formed ``&amp;``/``&lt;`` in
+    its "HTML" output, which is valid Pango markup, and the plain-text path
+    (``_html_to_plain``) unescapes the entities back to the original symbols.
+    """
+    return escape(value or "", quote=False)
+
+
 def _names(raw: str) -> list[dict]:
     """Convert a BibTeX author/editor string to CSL name objects."""
     out = []
     for surname, given in apa.author_tokens(raw or ""):
-        name = {"family": surname}
+        name = {"family": _markup_safe(surname)}
         if given:
-            name["given"] = given
+            name["given"] = _markup_safe(given)
         out.append(name)
     return out
 
@@ -86,7 +100,7 @@ def entry_to_csl_json(entry: dict) -> dict:
 
     item: dict = {"id": entry.get("ID") or entry.get("id") or "ITEM-1",
                   "type": csl_type}
-    title = apa._clean(entry.get("title"))
+    title = _markup_safe(apa._clean(entry.get("title")))
     if title:
         item["title"] = title
     authors = _names(entry.get("author"))
@@ -95,11 +109,12 @@ def entry_to_csl_json(entry: dict) -> dict:
     editors = _names(entry.get("editor"))
     if editors:
         item["editor"] = editors
-    container = apa._clean(entry.get("journal") or entry.get("journaltitle")
-                           or booktitle)
+    container = _markup_safe(apa._clean(entry.get("journal")
+                                        or entry.get("journaltitle")
+                                        or booktitle))
     if container:
         item["container-title"] = container
-    publisher = apa._clean(entry.get("publisher"))
+    publisher = _markup_safe(apa._clean(entry.get("publisher")))
     if publisher:
         item["publisher"] = publisher
     vol = apa._clean(entry.get("volume"))

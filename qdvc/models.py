@@ -12,6 +12,7 @@ from pathlib import Path
 import yaml
 
 from . import apa
+from . import acis
 from .bibtex import parse_bibtex
 from .markdown_io import parse_markdown
 
@@ -45,6 +46,20 @@ class Record:
 
     def apa_plain(self) -> str:
         return apa.format_apa_plain(self.bib())
+
+    def acis_markup(self, disambiguator: str = "") -> str:
+        return acis.format_acis_markup(self.bib(), disambiguator)
+
+    def acis_plain(self, disambiguator: str = "") -> str:
+        return acis.format_acis_plain(self.bib(), disambiguator)
+
+    def acis_in_text_markup(self, disambiguator: str = "",
+                            narrative: bool = False) -> str:
+        return acis.in_text_markup(self.bib(), disambiguator, narrative)
+
+    def acis_in_text_plain(self, disambiguator: str = "",
+                           narrative: bool = False) -> str:
+        return acis.in_text_plain(self.bib(), disambiguator, narrative)
 
     @property
     def outlet(self) -> str:

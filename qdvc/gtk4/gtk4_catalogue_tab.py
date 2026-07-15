@@ -27,10 +27,11 @@ from gi.repository import Gtk, Gdk, Gio, Pango, GObject, Adw  # noqa: E402
 
 from ..platform_utils import open_with_default_app, open_with_text_editor
 from .. import csl as csl_mod
+from .. import acis as acis_mod
 from ..catalogue_sort import (SORT_KEYS, count_label as _count_label,
                               order_jflags as _order_jflags,
                               markup_to_html as _markup_to_html,
-                              APA_STYLE_ID)
+                              APA_STYLE_ID, ACIS_STYLE_ID)
 from .gtk4_common import (NODE_ALL, NODE_TYPE, NODE_WORK, NODE_WORKS_ROOT,
                           NODE_AUTHOR, NODE_OUTLET, NODE_FULLTEXT, NODE_DOI,
                           NODE_TEMP, NavItem, RecordItem, TextItem)
@@ -661,6 +662,20 @@ class CatalogueView(Gtk.Box):
         ref_sw.set_child(self.ref_label)
         box.append(ref_sw)
 
+        # In-text citation row (shown only for styles that define one, i.e. the
+        # built-in ACIS style): both parenthetical and narrative forms.
+        self.intext_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL,
+                                  spacing=6)
+        intext_caption = Gtk.Label(xalign=0)
+        intext_caption.set_markup("<b>In-text</b>")
+        self.intext_box.append(intext_caption)
+        self.intext_label = Gtk.Label(xalign=0)
+        self.intext_label.set_wrap(True)
+        self.intext_label.set_selectable(True)
+        self.intext_box.append(self.intext_label)
+        self.intext_box.set_visible(False)
+        box.append(self.intext_box)
+
         btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         btn_box.set_margin_top(4)
         btn_box.set_margin_bottom(4)
@@ -720,18 +735,28 @@ class CatalogueView(Gtk.Box):
             self.open_pdf_btn.set_sensitive(False)
 
     def _active_csl_path(self):
-        if self._current_style == APA_STYLE_ID or not self.workspace:
+        if self._current_style in (APA_STYLE_ID, ACIS_STYLE_ID) \
+                or not self.workspace:
             return None
         p = self.workspace.csl_path(self._current_style)
         return str(p) if p else None
 
+    def _acis_disambiguator(self, rec):
+        if not self.workspace:
+            return ""
+        return self.workspace.acis_disambiguator(rec)
+
     def _reference_markup(self, rec):
+        if self._current_style == ACIS_STYLE_ID:
+            return rec.acis_markup(self._acis_disambiguator(rec))
         csl_path = self._active_csl_path()
         if csl_path:
             return csl_mod.render_markup(rec.bib(), csl_path)
         return rec.apa_markup()
 
     def _reference_plain(self, rec):
+        if self._current_style == ACIS_STYLE_ID:
+            return rec.acis_plain(self._acis_disambiguator(rec))
         csl_path = self._active_csl_path()
         if csl_path:
             return csl_mod.render_plain(rec.bib(), csl_path)
@@ -742,6 +767,19 @@ class CatalogueView(Gtk.Box):
             self.ref_label.set_markup(self._reference_markup(rec))
         except Exception:  # noqa: BLE001
             self.ref_label.set_text(self._reference_plain(rec))
+        self._render_intext(rec)
+
+    def _render_intext(self, rec):
+        """Show the in-text citation row for styles that define one (ACIS):
+        both the parenthetical and narrative forms."""
+        if self._current_style != ACIS_STYLE_ID:
+            self.intext_box.set_visible(False)
+            return
+        dis = self._acis_disambiguator(rec)
+        paren = rec.acis_in_text_plain(dis, narrative=False)
+        narrative = rec.acis_in_text_plain(dis, narrative=True)
+        self.intext_label.set_text(f"{paren}    {narrative}")
+        self.intext_box.set_visible(True)
 
     def _style_ids(self):
         """Ordered list of style ids currently in the dropdown model."""
@@ -752,10 +790,11 @@ class CatalogueView(Gtk.Box):
         self._suppress_style_change = True
         self.style_model.remove_all()
         self.style_model.append(TextItem("APA 7 (built-in)", APA_STYLE_ID))
+        self.style_model.append(TextItem("ACIS (built-in)", ACIS_STYLE_ID))
         files = self.workspace.list_csl_files() if self.workspace else []
         for name in files:
             self.style_model.append(TextItem(name, name))
-        if self._current_style != APA_STYLE_ID and \
+        if self._current_style not in (APA_STYLE_ID, ACIS_STYLE_ID) and \
                 self._current_style not in files:
             self._current_style = APA_STYLE_ID
         ids = self._style_ids()
@@ -1065,6 +1104,7 @@ class CatalogueView(Gtk.Box):
         else:
             self.master_store.remove_all()
         self.ref_label.set_text("")
+        self.intext_box.set_visible(False)
         self._suppress_notes_save = True
         self.notes_buffer.set_text("")
         self._suppress_notes_save = False

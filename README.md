@@ -18,8 +18,10 @@ Git or Syncthing.
   availability, by DOI status, by project, or by a starred author or outlet,
   each filter showing the number of matching articles), scan the sortable table
   in the middle (with a J-Flags column and a nickname-prefaced Outlet), and read
-  the reference — rendered with the built-in APA 7 style or a custom CSL style
-  you pick from a dropdown — alongside your syntax-highlighted Markdown notes on
+  the reference — rendered with a built-in style (APA 7 or ACIS) or a custom
+  CSL style you pick from a dropdown; the ACIS style also shows the matching
+  in-text citation (both parenthetical and narrative forms) — alongside your
+  syntax-highlighted Markdown notes on
   the right. Sort by several keys at once (e.g. Year descending, then Author
   ascending). Copy references as rich text or plain text in one click.
   Right-click a record (or press the Menu key) for actions including "Go to
@@ -52,7 +54,7 @@ Git or Syncthing.
 - PyYAML
 - `bibtexparser` (optional — a built-in fallback parser is used if it's absent)
 - `citeproc-py` (optional — enables rendering references with custom CSL
-  styles; without it the built-in APA renderer is the only option)
+  styles; without it the built-in APA 7 and ACIS renderers are the only options)
 
 ## Install & run
 

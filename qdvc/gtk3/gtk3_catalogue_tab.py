@@ -17,12 +17,14 @@ from .gtk3_widgets import (  # noqa: E402
     set_clipboard_rich as _set_clipboard_rich,
 )
 from .. import csl as csl_mod  # noqa: E402
+from .. import acis as acis_mod  # noqa: E402
 from ..catalogue_sort import (  # noqa: E402
     SORT_KEYS,
     count_label as _count_label,
     order_jflags as _order_jflags,
     markup_to_html as _markup_to_html,
     APA_STYLE_ID,
+    ACIS_STYLE_ID,
 )
 
 
@@ -612,6 +614,21 @@ class CatalogueTab(Gtk.Box):
         ref_sw.add(self.ref_label)
         box.pack_start(ref_sw, False, True, 0)
 
+        # In-text citation row (shown only for styles that define one, i.e. the
+        # built-in ACIS style). Gives both the parenthetical and narrative
+        # forms so the user can copy whichever the sentence needs.
+        self.intext_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL,
+                                  spacing=6)
+        self.intext_box.set_no_show_all(True)
+        intext_caption = Gtk.Label(xalign=0)
+        intext_caption.set_markup("<b>In-text</b>")
+        self.intext_box.pack_start(intext_caption, False, False, 0)
+        self.intext_label = Gtk.Label(xalign=0)
+        self.intext_label.set_line_wrap(True)
+        self.intext_label.set_selectable(True)
+        self.intext_box.pack_start(self.intext_label, False, False, 0)
+        box.pack_start(self.intext_box, False, False, 2)
+
         btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         self.copy_rich_btn = Gtk.Button(label="Copy (rich)")
         self.copy_plain_btn = Gtk.Button(label="Copy (plain text)")
@@ -661,20 +678,31 @@ class CatalogueTab(Gtk.Box):
             self.open_pdf_btn.set_sensitive(False)
 
     def _active_csl_path(self):
-        """The path of the currently-selected CSL file, or None when the
-        built-in APA renderer is active (or the file has gone missing)."""
-        if self._current_style == APA_STYLE_ID or not self.workspace:
+        """The path of the currently-selected CSL file, or None when a built-in
+        renderer (APA or ACIS) is active (or the file has gone missing)."""
+        if self._current_style in (APA_STYLE_ID, ACIS_STYLE_ID) \
+                or not self.workspace:
             return None
         p = self.workspace.csl_path(self._current_style)
         return str(p) if p else None
 
+    def _acis_disambiguator(self, rec):
+        """The ACIS year-disambiguation letter for *rec* (or '')."""
+        if not self.workspace:
+            return ""
+        return self.workspace.acis_disambiguator(rec)
+
     def _reference_markup(self, rec):
+        if self._current_style == ACIS_STYLE_ID:
+            return rec.acis_markup(self._acis_disambiguator(rec))
         csl_path = self._active_csl_path()
         if csl_path:
             return csl_mod.render_markup(rec.bib(), csl_path)
         return rec.apa_markup()
 
     def _reference_plain(self, rec):
+        if self._current_style == ACIS_STYLE_ID:
+            return rec.acis_plain(self._acis_disambiguator(rec))
         csl_path = self._active_csl_path()
         if csl_path:
             return csl_mod.render_plain(rec.bib(), csl_path)
@@ -686,6 +714,21 @@ class CatalogueTab(Gtk.Box):
             self.ref_label.set_markup(self._reference_markup(rec))
         except Exception:  # noqa: BLE001
             self.ref_label.set_text(self._reference_plain(rec))
+        self._render_intext(rec)
+
+    def _render_intext(self, rec):
+        """Show the in-text citation row for styles that define one (ACIS).
+
+        Displays both the parenthetical and narrative forms, e.g.
+        ``(Smith and Jones 2026)`` and ``Smith and Jones (2026)``."""
+        if self._current_style != ACIS_STYLE_ID:
+            self.intext_box.hide()
+            return
+        dis = self._acis_disambiguator(rec)
+        paren = rec.acis_in_text_plain(dis, narrative=False)
+        narrative = rec.acis_in_text_plain(dis, narrative=True)
+        self.intext_label.set_text(f"{paren}    {narrative}")
+        self.intext_box.show()
 
     def _populate_style_combo(self):
         """Fill the citation-style dropdown: the built-in APA renderer plus
@@ -694,11 +737,12 @@ class CatalogueTab(Gtk.Box):
         self._suppress_style_change = True
         self.style_combo.remove_all()
         self.style_combo.append(APA_STYLE_ID, "APA 7 (built-in)")
+        self.style_combo.append(ACIS_STYLE_ID, "ACIS (built-in)")
         files = self.workspace.list_csl_files() if self.workspace else []
         for name in files:
             self.style_combo.append(name, name)
         # Restore the current style if it is still valid, else fall back.
-        if self._current_style != APA_STYLE_ID and \
+        if self._current_style not in (APA_STYLE_ID, ACIS_STYLE_ID) and \
                 self._current_style not in files:
             self._current_style = APA_STYLE_ID
         self.style_combo.set_active_id(self._current_style)
@@ -1064,6 +1108,7 @@ class CatalogueTab(Gtk.Box):
         else:
             self.master_store.clear()
         self.ref_label.set_text("")
+        self.intext_box.hide()
         self._suppress_notes_save = True
         self.notes_buffer.set_text("")
         self._suppress_notes_save = False

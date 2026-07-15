@@ -18,6 +18,9 @@ def year_key(r):
 # Lives here (pure) so both front-ends and ui_prefs share one definition.
 APA_STYLE_ID = "__apa__"
 
+# Sentinel id for the built-in ACIS renderer (companion to APA_STYLE_ID).
+ACIS_STYLE_ID = "__acis__"
+
 
 # Multi-key sort: maps a stable sort-key id to a callable producing a
 # comparison key from a Record. Order of this dict is the order shown to the

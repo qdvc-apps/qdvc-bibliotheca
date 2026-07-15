@@ -22,7 +22,7 @@ files plus a fast in-memory index. Consequences:
 
 **Separation of concerns.** The top-level `qdvc/` package is **pure**,
 toolkit-independent logic with no GTK imports (`workspace.py`, `models.py`,
-`bibtex.py`, `markdown_io.py`, `naming.py`, `apa.py`, `csl.py`,
+`bibtex.py`, `markdown_io.py`, `naming.py`, `apa.py`, `acis.py`, `csl.py`,
 `catalogue_sort.py`, `config.py`, `platform_utils.py`). **All GTK3 code lives
 in the `qdvc/gtk3/` sub-package**, where every module is prefixed `gtk3_`. This
 split is what lets the model be unit-tested without a display (see §9), and it
@@ -46,7 +46,10 @@ reading happen per-record, on demand.
 - PyYAML (hard dependency).
 - `bibtexparser` (optional; a built-in fallback parser is used when absent).
 - `citeproc-py` (optional; enables the CSL citation-style renderer in `csl.py`.
-  Absent, the citation-style dropdown offers only the built-in APA renderer).
+  Absent, the citation-style dropdown offers the built-in APA 7 and ACIS
+  renderers only). `csl.py` escapes `&`/`<`/`>` in field values before handing
+  them to citeproc (whose HTML formatter does not escape), so the markup it
+  returns is valid Pango markup and the plain path round-trips the symbols.
 
 Both front-ends exist in the tree and share the same pure core. The toolkit is
 chosen at launch (see §3.3): the `ui_backend` config key (default `gtk3`), or a
@@ -76,6 +79,8 @@ qdvc/                       PURE package — no GTK imports anywhere here.
     markdown_io.py         Markdown / YAML-frontmatter read & write.
     naming.py              id / slug / nickname / DOI helpers.
     apa.py                 BibTeX-entry -> APA 7 formatter (markup + plain).
+    acis.py                BibTeX-entry -> ACIS formatter (reference markup +
+                           plain, plus in-text citation + disambiguation).
     csl.py                 Optional CSL renderer (via citeproc-py) + fallback.
     catalogue_sort.py      Pure sort-keys, count/label + J-Flag ordering helpers,
                            and the APA_STYLE_ID sentinel.
@@ -297,8 +302,9 @@ referenced `.bib` path no longer exists.
 their priority numbers (lower = shown first in the Catalogue's J-Flags column);
 read via `MainWindow._jflag_presets`/`_jflag_priority_map`. The `csl_styles`
 key is a `{workspace_root_path: style_id}` map persisting the chosen citation
-style per workspace (`style_id` is the `APA_STYLE_ID` sentinel or a CSL
-filename); read via `MainWindow._saved_citation_style` and written by
+style per workspace (`style_id` is the `APA_STYLE_ID` or `ACIS_STYLE_ID`
+sentinel, or a CSL filename); read via `MainWindow._saved_citation_style` and
+written by
 `_on_citation_style_chosen`. When you add a preference, add it in
 `gtk3/gtk3_preferences.py` (widget + `apply()`) and read it where used; no schema
 migration is needed because `Config.get` takes a default.
@@ -324,9 +330,12 @@ The model is spread across small pure modules, all re-exported from
 
 One catalogued work. Index fields are eager; `bib()` lazily parses the `.bib`
 and caches it in `_bib`. Helpers: `apa_markup()`, `apa_plain()`,
-`read_notes()`, and the `outlet` property (journal for journal articles,
-book/proceedings title for chapters and proceedings, em dash otherwise — drives
-the Outlet column).
+`acis_markup(disambiguator)`, `acis_plain(disambiguator)`,
+`acis_in_text_markup/plain(disambiguator, narrative)`, `read_notes()`, and the
+`outlet` property (journal for journal articles, book/proceedings title for
+chapters and proceedings, em dash otherwise — drives the Outlet column). The
+ACIS disambiguator letter is supplied by the caller (the workspace computes it
+— see §7.1), keeping `Record` stateless.
 
 ### 5.2 `MyWork`
 
@@ -377,7 +386,8 @@ load(force_rescan=False):
 `records_for_outlet(outlet_id)`, `outlet_for_record(rec)` (None when the
 record is not a journal article / proceedings), `lookup_doi(doi)`,
 `get(bibliotheca_id)`, `list_csl_files()` (CSL filenames in `csl/`, sorted),
-`csl_path(filename)`.
+`csl_path(filename)`, `acis_disambiguator(record)` (the ACIS year letter for a
+record — see §7.1).
 
 ### 5.6 Mutation API
 
@@ -497,6 +507,36 @@ journals, entities escaped). `format_apa_plain(entry)` strips it to text.
 The rich-vs-plain design exists to support the two Copy buttons and the
 HTML-clipboard path in the Catalogue (see §8.2).
 
+### 7.1 ACIS formatting (`acis.py`)
+
+A second built-in style, parallel to `apa.py`, selected via the `ACIS_STYLE_ID`
+sentinel (`"__acis__"`, defined in `catalogue_sort.py` beside `APA_STYLE_ID`).
+It differs from APA in visible ways: the year follows the authors with no
+parentheses and a trailing period; article/chapter titles are curly-quoted with
+the following comma *inside* the closing quote; every author stays
+surname-first and the final author is joined with ", and"; journal
+volume/issue render as `(vol:iss)`; a DOI renders as `(doi:…)` in place of a
+page range; and `@online` uses an `(url, accessed <D Month YYYY>)` tail.
+
+- `format_acis_markup(entry, disambiguator="")` / `format_acis_plain(...)`
+  return the reference-list form (Pango markup / plain). Renderers are keyed by
+  entry type in `_RENDERERS`, with the same "Proceedings of" `incollection`
+  special-case as APA (`_pick_renderer`).
+- `in_text_markup(entry, disambiguator="", narrative=False)` /
+  `in_text_plain(...)` return the in-text citation: parenthetical
+  `(Smith and Jones 2026)` / `(Thompson et al. 2026)` (three+ authors collapse
+  to "et al."), or narrative `Smith and Jones (2026)` when `narrative=True`.
+- `escape()` is wrapped to default `quote=False`, so apostrophes/quotes stay
+  literal in markup content and survive the `markup_to_plain` round-trip.
+
+**Disambiguation.** When two records share an author list and year, ACIS
+appends a letter (`2025a`, `2025b`). `acis.disambiguator_map(records)` groups by
+`(surnames, year)` using only the cached `Record` fields (no BibTeX parse) and
+assigns letters in title order. `Workspace.acis_disambiguator(record)` caches
+that map (keyed by record count, so it rebuilds after import/rescan) and returns
+the letter for one record; the Catalogue passes it into the `Record.acis_*`
+helpers so the reference and in-text forms stay consistent.
+
 ---
 
 ## 8. UI layer
@@ -604,15 +644,20 @@ Three panes in nested `Gtk.Paned`:
     full-text.
 
 - **Pane 3 (detail)** — a header row with a **citation-style dropdown**
-  (`style_combo`: "APA 7 (built-in)" plus every CSL file from the workspace's
-  `csl/` folder, listed by filename), the reference label (Pango markup),
-  Copy (rich) / Copy (plain) buttons, an **Open PDF** button (shown enabled
-  only when a PDF is set), the editable notes `TextView`, and a status line.
+  (`style_combo`: "APA 7 (built-in)", "ACIS (built-in)", plus every CSL file
+  from the workspace's `csl/` folder, listed by filename), the reference label
+  (Pango markup), an **in-text citation row** (`intext_box`/`intext_label`,
+  shown only for styles that define one — currently ACIS — with both the
+  parenthetical and narrative forms), Copy (rich) / Copy (plain) buttons, an
+  **Open PDF** button (shown enabled only when a PDF is set), the editable notes
+  `TextView`, and a status line.
   `_render_reference`/`_reference_markup`/`_reference_plain` route through the
-  built-in APA renderer when the style is `APA_STYLE_ID`, else through
-  `csl.render_markup`/`render_plain` with the selected CSL file. Changing the
-  dropdown fires `_on_style_changed`, which re-renders and calls the
-  `_style_change_cb` so the main window persists the choice per workspace.
+  built-in APA renderer when the style is `APA_STYLE_ID`, the built-in ACIS
+  renderer (with the year letter from `workspace.acis_disambiguator`) when it is
+  `ACIS_STYLE_ID`, else through `csl.render_markup`/`render_plain` with the
+  selected CSL file. `_render_intext` fills (and shows/hides) the in-text row.
+  Changing the dropdown fires `_on_style_changed`, which re-renders and calls
+  the `_style_change_cb` so the main window persists the choice per workspace.
 
 **Multi-key sorting**: sorting is done in the model layer, not via GTK's
 single-column `set_sort_column_id`. The tab holds `_sort_spec`, an ordered list
@@ -806,12 +851,22 @@ placeholder, not a crash).
   in `gtk3/gtk3_outlets_tab.py`; the presets in `gtk3/gtk3_preferences.py` + `MainWindow`'s
   `_jflag_presets`/`_jflag_priority_map`.
 - **Tweak CSL rendering** → `csl.py` (`entry_to_csl_json` for the BibTeX→CSL-JSON
-  mapping, `_html_to_pango`/`_html_to_plain` for output); the dropdown +
-  rendering in `catalogue_tab` (`_populate_style_combo`, `_reference_markup`);
-  persistence in `MainWindow._saved_citation_style`/`_on_citation_style_chosen`.
+  mapping — text fields pass through `_markup_safe` there, so a raw `&`/`<`/`>`
+  cannot break the Pango label; `_html_to_pango`/`_html_to_plain` for output);
+  the dropdown + rendering in `catalogue_tab` (`_populate_style_combo`,
+  `_reference_markup`); persistence in
+  `MainWindow._saved_citation_style`/`_on_citation_style_chosen`.
 - **Add a BibTeX entry type / tweak APA** → `apa._RENDERERS`, `TYPE_LABELS`,
   and `type_label` (which also inspects `booktitle` for the Proceedings case).
   If you add a new human label, update `Record.outlet` and any By-type list.
+- **Tweak ACIS or its in-text citation** → `acis.py` (`_RENDERERS` /
+  `_pick_renderer` for the reference forms, `in_text_plain`/`_author_label` for
+  the in-text forms, `disambiguator_map` for the year letters). The `Record`
+  helpers (`acis_*`) and `Workspace.acis_disambiguator` are the integration
+  points; the Pane-3 wiring (`_reference_markup`, `_render_intext`,
+  `_populate_style_combo`) lives in both `gtk3_catalogue_tab.py` and
+  `gtk4_catalogue_tab.py`. Add any new built-in style id beside `ACIS_STYLE_ID`
+  in `catalogue_sort.py`.
 - **Change the cached record schema** → update `Record`, `_scan`, `_load_index`,
   `_save_index`, and **bump `INDEX_VERSION`**.
 - **Add a menu/toolbar action** → the relevant `_*_menu`/`_build_toolbar`
@@ -905,9 +960,9 @@ Beyond the §4.6 list:
   Unknown field ids load harmlessly: `_sorted_records` skips any key absent from
   `SORT_KEYS`.
 - `csl_styles` — a `{workspace_root_path: style_id}` map persisting the chosen
-  citation style per workspace (`style_id` is the `APA_STYLE_ID` sentinel or a
-  CSL filename), read/written by `ui_prefs.saved_citation_style` /
-  `store_citation_style` in both front-ends.
+  citation style per workspace (`style_id` is the `APA_STYLE_ID` or
+  `ACIS_STYLE_ID` sentinel, or a CSL filename), read/written by
+  `ui_prefs.saved_citation_style` / `store_citation_style` in both front-ends.
 - `ui_backend` — `"gtk3"` (default) or `"gtk4"`, chosen from either UI's
   Preferences and read by the launcher (§3.3). `Config.ui_backend` validates it.
 

@@ -115,6 +115,25 @@ class Workspace:
         p = self.csl_dir / filename
         return p if p.is_file() else None
 
+    def acis_disambiguator(self, record) -> str:
+        """The ACIS year-disambiguation letter for ``record`` ('' when the
+        author/year pair is unique in this workspace).
+
+        Records sharing an author/year get 'a', 'b', … (title order). The map
+        is computed lazily across all cached records and rebuilt whenever the
+        record set changes (tracked by identity of the ``records`` dict), so it
+        stays cheap for repeated Pane-3 lookups without going stale after an
+        import or rescan.
+        """
+        from . import acis
+        cache = getattr(self, "_acis_disambig_cache", None)
+        stamp = len(self.records)
+        if cache is None or cache[0] != stamp:
+            cache = (stamp, acis.disambiguator_map(self.records.values()))
+            self._acis_disambig_cache = cache
+        bid = getattr(record, "bibliotheca_id", "")
+        return cache[1].get(bid, "")
+
     @property
     def index_path(self) -> Path:
         return self.root / INDEX_FILENAME
