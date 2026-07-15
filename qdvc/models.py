@@ -11,8 +11,8 @@ from pathlib import Path
 
 import yaml
 
-from . import apa
-from . import acis
+from . import builtin_apa7 as apa
+from . import builtin_acis as acis
 from .bibtex import parse_bibtex
 from .markdown_io import parse_markdown
 

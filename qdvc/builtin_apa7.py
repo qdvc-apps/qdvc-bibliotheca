@@ -7,83 +7,38 @@ Produces two forms:
 This is a pragmatic formatter covering the common source types an academic
 collection contains (journal article, conference paper, book, book chapter,
 webpage, and a sensible fallback). It is not a full CSL engine.
+
+The style-agnostic primitives (author splitting, initials, field cleaning,
+type labels, italic wrapping, markup->plain) live in :mod:`builtin`; this module
+only decides how APA arranges them.
 """
 
 import re
-from html import escape
+
+from . import builtin
+from .builtin import (  # noqa: F401  (re-exported for backward compatibility)
+    author_tokens,
+    split_name,
+    type_label,
+    markup_to_plain,
+    TYPE_LABELS,
+)
+
+# APA historically escaped markup content with quotes on (via html.escape's
+# default), so apostrophes/quotes became &#x27;/&quot; entities. Preserve that
+# exactly by defaulting quote=True here; builtin.markup_to_plain unescapes those
+# entities on the plain path.
+def escape(text, quote=True):
+    return builtin.escape(text, quote=quote)
+
 
 # ---------------------------------------------------------------------------
 # Author handling
 # ---------------------------------------------------------------------------
 
-def _split_authors(raw: str) -> list[str]:
-    if not raw:
-        return []
-    # BibTeX separates authors with " and " (not inside braces).
-    parts = re.split(r"\s+and\s+", raw.strip())
-    return [p.strip() for p in parts if p.strip()]
-
-
-def split_name(name: str) -> tuple[str, str]:
-    """Split a single BibTeX author token into (surname, given_names).
-
-    Handles both "Surname, Given Names" and "Given Names Surname" forms.
-    Returns given_names as a space-joined string (may be empty).
-    """
-    name = name.replace("{", "").replace("}", "").strip()
-    if not name:
-        return "", ""
-    if "," in name:
-        last, _, first = name.partition(",")
-        return last.strip(), first.strip()
-    bits = name.split()
-    if len(bits) == 1:
-        return bits[0], ""
-    return bits[-1], " ".join(bits[:-1])
-
-
-def author_tokens(raw: str) -> list[tuple[str, str]]:
-    """Return a list of (surname, given_names) for every author in `raw`."""
-    out = []
-    for tok in _split_authors(raw):
-        surname, given = split_name(tok)
-        if surname:
-            out.append((surname, given))
-    return out
-
-
-def _format_one_author(name: str) -> str:
-    """Return 'Surname, F. M.' for a single BibTeX author token."""
-    name = name.replace("{", "").replace("}", "").strip()
-    if not name:
-        return ""
-    if "," in name:
-        last, _, first = name.partition(",")
-        last, first = last.strip(), first.strip()
-    else:
-        bits = name.split()
-        last = bits[-1]
-        first = " ".join(bits[:-1])
-    initials = _initials(first)
-    if initials:
-        return f"{last}, {initials}"
-    return last
-
-
-def _initials(first: str) -> str:
-    out = []
-    for token in re.split(r"[\s\-]+", first.strip()):
-        token = token.strip(".")
-        if not token:
-            continue
-        # Preserve hyphenated given names loosely as separate initials.
-        out.append(f"{token[0].upper()}.")
-    return " ".join(out)
-
-
 def format_author_list(raw: str) -> str:
     """APA author string: 'Smith, J., & Jones, A.' with up to 20 authors."""
-    authors = [_format_one_author(a) for a in _split_authors(raw)]
+    authors = [builtin.surname_initials(a) for a in builtin.split_authors(raw)]
     authors = [a for a in authors if a]
     if not authors:
         return ""
@@ -100,18 +55,10 @@ def format_author_list(raw: str) -> str:
 # Field helpers
 # ---------------------------------------------------------------------------
 
-def _clean(value: str | None) -> str:
-    if not value:
-        return ""
-    value = value.replace("{", "").replace("}", "")
-    value = re.sub(r"\s+", " ", value).strip()
-    return value
-
-
 def _year(entry: dict) -> str:
-    y = _clean(entry.get("year"))
+    y = builtin.clean(entry.get("year"))
     if not y:
-        date = _clean(entry.get("date"))
+        date = builtin.clean(entry.get("date"))
         m = re.match(r"(\d{4})", date)
         y = m.group(1) if m else ""
     return f"({y})" if y else "(n.d.)"
@@ -130,16 +77,16 @@ def _sentence_case(title: str) -> str:
 
 
 def _i(text: str) -> str:
-    """Wrap in Pango italic markup, escaping the inner text."""
-    return f"<i>{escape(text)}</i>" if text else ""
+    """Wrap in Pango italic markup, escaping the inner text (quotes escaped)."""
+    return builtin.italic(text, quote=True)
 
 
 def _doi_url(entry: dict) -> str:
-    doi = _clean(entry.get("doi"))
+    doi = builtin.clean(entry.get("doi"))
     if doi:
         doi = re.sub(r"^https?://(dx\.)?doi\.org/", "", doi)
         return f"https://doi.org/{doi}"
-    return _clean(entry.get("url"))
+    return builtin.clean(entry.get("url"))
 
 
 # ---------------------------------------------------------------------------
@@ -149,11 +96,11 @@ def _doi_url(entry: dict) -> str:
 def _render_article(e: dict) -> str:
     authors = format_author_list(e.get("author", ""))
     year = _year(e)
-    title = _sentence_case(_clean(e.get("title")))
-    journal = _clean(e.get("journal") or e.get("journaltitle"))
-    volume = _clean(e.get("volume"))
-    issue = _clean(e.get("number") or e.get("issue"))
-    pages = _clean(e.get("pages")).replace("--", "\u2013")
+    title = _sentence_case(builtin.clean(e.get("title")))
+    journal = builtin.clean(e.get("journal") or e.get("journaltitle"))
+    volume = builtin.clean(e.get("volume"))
+    issue = builtin.clean(e.get("number") or e.get("issue"))
+    pages = builtin.clean(e.get("pages")).replace("--", "\u2013")
     url = _doi_url(e)
 
     parts = []
@@ -183,9 +130,9 @@ def _render_article(e: dict) -> str:
 def _render_inproceedings(e: dict) -> str:
     authors = format_author_list(e.get("author", ""))
     year = _year(e)
-    title = _clean(e.get("title"))
-    book = _clean(e.get("booktitle"))
-    pages = _clean(e.get("pages")).replace("--", "\u2013")
+    title = builtin.clean(e.get("title"))
+    book = builtin.clean(e.get("booktitle"))
+    pages = builtin.clean(e.get("pages")).replace("--", "\u2013")
     url = _doi_url(e)
 
     parts = []
@@ -210,9 +157,9 @@ def _render_inproceedings(e: dict) -> str:
 def _render_book(e: dict) -> str:
     authors = format_author_list(e.get("author", "") or e.get("editor", ""))
     year = _year(e)
-    title = _clean(e.get("title"))
-    edition = _clean(e.get("edition"))
-    publisher = _clean(e.get("publisher"))
+    title = builtin.clean(e.get("title"))
+    edition = builtin.clean(e.get("edition"))
+    publisher = builtin.clean(e.get("publisher"))
     url = _doi_url(e)
 
     parts = []
@@ -235,11 +182,11 @@ def _render_book(e: dict) -> str:
 def _render_inbook(e: dict) -> str:
     authors = format_author_list(e.get("author", ""))
     year = _year(e)
-    title = _clean(e.get("title"))
-    book = _clean(e.get("booktitle"))
+    title = builtin.clean(e.get("title"))
+    book = builtin.clean(e.get("booktitle"))
     editor = format_author_list(e.get("editor", ""))
-    pages = _clean(e.get("pages")).replace("--", "\u2013")
-    publisher = _clean(e.get("publisher"))
+    pages = builtin.clean(e.get("pages")).replace("--", "\u2013")
+    publisher = builtin.clean(e.get("publisher"))
     url = _doi_url(e)
 
     parts = []
@@ -268,9 +215,9 @@ def _render_inbook(e: dict) -> str:
 def _render_online(e: dict) -> str:
     authors = format_author_list(e.get("author", ""))
     year = _year(e)
-    title = _clean(e.get("title"))
-    site = _clean(e.get("organization") or e.get("publisher")
-                  or e.get("howpublished"))
+    title = builtin.clean(e.get("title"))
+    site = builtin.clean(e.get("organization") or e.get("publisher")
+                         or e.get("howpublished"))
     url = _doi_url(e)
 
     parts = []
@@ -301,35 +248,6 @@ _RENDERERS = {
     "webpage": _render_online,
 }
 
-# A friendlier label for the "type" column / sidebar filtering.
-TYPE_LABELS = {
-    "article": "Journal article",
-    "inproceedings": "Proceedings",
-    "conference": "Proceedings",
-    "proceedings": "Proceedings",
-    "book": "Book",
-    "inbook": "Book chapter",
-    "incollection": "Book chapter",
-    "online": "Webpage",
-    "electronic": "Webpage",
-    "webpage": "Webpage",
-    "misc": "Other",
-}
-
-
-def type_label(entrytype: str, booktitle: str | None = None) -> str:
-    """Map a BibTeX entry type to a human label.
-
-    An ``incollection`` whose ``booktitle`` begins with "Proceedings of" is
-    treated as "Proceedings" rather than "Book chapter", so conference material
-    filed as a collection chapter is grouped with the other proceedings.
-    """
-    et = (entrytype or "").lower()
-    if et == "incollection" and booktitle:
-        if _clean(booktitle).lower().startswith("proceedings of"):
-            return "Proceedings"
-    return TYPE_LABELS.get(et, "Other")
-
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -342,24 +260,7 @@ def format_apa_markup(entry: dict) -> str:
     """
     etype = (entry.get("ENTRYTYPE") or entry.get("entrytype") or "misc").lower()
     renderer = _RENDERERS.get(etype, _render_online)
-    markup = renderer(entry)
-    # Collapse doubled spaces/periods that can arise from empty fields.
-    markup = re.sub(r"\s+\.", ".", markup)
-    markup = re.sub(r"\.\.", ".", markup)
-    markup = re.sub(r"\s{2,}", " ", markup).strip()
-    return markup
-
-
-_TAG_RE = re.compile(r"<[^>]+>")
-_ENTITY = {"&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&#39;": "'"}
-
-
-def markup_to_plain(markup: str) -> str:
-    """Strip Pango tags and unescape entities to yield plain text."""
-    text = _TAG_RE.sub("", markup)
-    for ent, ch in _ENTITY.items():
-        text = text.replace(ent, ch)
-    return text
+    return builtin.collapse_artefacts(renderer(entry))
 
 
 def format_apa_plain(entry: dict) -> str:

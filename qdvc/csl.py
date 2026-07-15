@@ -6,7 +6,7 @@ returns ``False`` and the Catalogue simply keeps the built-in APA renderer as
 the only choice (the CSL dropdown still lists files but selecting one shows a
 short "install citeproc-py" note rather than crashing).
 
-The public surface mirrors ``apa``:
+The public surface mirrors the built-in formatters:
 
     render_markup(entry, csl_path) -> Pango markup string
     render_plain(entry, csl_path)  -> plain-text string
@@ -19,7 +19,8 @@ handing it to citeproc.
 import re
 from html import escape, unescape
 
-from . import apa
+from . import builtin
+from . import builtin_apa7 as apa
 
 
 def csl_available() -> bool:
@@ -68,7 +69,7 @@ def _markup_safe(value: str) -> str:
 def _names(raw: str) -> list[dict]:
     """Convert a BibTeX author/editor string to CSL name objects."""
     out = []
-    for surname, given in apa.author_tokens(raw or ""):
+    for surname, given in builtin.author_tokens(raw or ""):
         name = {"family": _markup_safe(surname)}
         if given:
             name["given"] = _markup_safe(given)
@@ -77,9 +78,9 @@ def _names(raw: str) -> list[dict]:
 
 
 def _year_parts(entry: dict) -> dict | None:
-    y = apa._clean(entry.get("year"))
+    y = builtin.clean(entry.get("year"))
     if not y:
-        date = apa._clean(entry.get("date"))
+        date = builtin.clean(entry.get("date"))
         m = re.match(r"(\d{4})", date)
         y = m.group(1) if m else ""
     if not y:
@@ -93,14 +94,14 @@ def _year_parts(entry: dict) -> dict | None:
 def entry_to_csl_json(entry: dict) -> dict:
     """Build a minimal CSL-JSON item dict from a normalised BibTeX entry."""
     et = (entry.get("ENTRYTYPE") or entry.get("entrytype") or "misc").lower()
-    booktitle = apa._clean(entry.get("booktitle"))
+    booktitle = builtin.clean(entry.get("booktitle"))
     csl_type = _CSL_TYPE.get(et, "document")
     if et == "incollection" and booktitle.lower().startswith("proceedings of"):
         csl_type = "paper-conference"
 
     item: dict = {"id": entry.get("ID") or entry.get("id") or "ITEM-1",
                   "type": csl_type}
-    title = _markup_safe(apa._clean(entry.get("title")))
+    title = _markup_safe(builtin.clean(entry.get("title")))
     if title:
         item["title"] = title
     authors = _names(entry.get("author"))
@@ -109,28 +110,28 @@ def entry_to_csl_json(entry: dict) -> dict:
     editors = _names(entry.get("editor"))
     if editors:
         item["editor"] = editors
-    container = _markup_safe(apa._clean(entry.get("journal")
+    container = _markup_safe(builtin.clean(entry.get("journal")
                                         or entry.get("journaltitle")
                                         or booktitle))
     if container:
         item["container-title"] = container
-    publisher = _markup_safe(apa._clean(entry.get("publisher")))
+    publisher = _markup_safe(builtin.clean(entry.get("publisher")))
     if publisher:
         item["publisher"] = publisher
-    vol = apa._clean(entry.get("volume"))
+    vol = builtin.clean(entry.get("volume"))
     if vol:
         item["volume"] = vol
-    issue = apa._clean(entry.get("number") or entry.get("issue"))
+    issue = builtin.clean(entry.get("number") or entry.get("issue"))
     if issue:
         item["issue"] = issue
-    pages = apa._clean(entry.get("pages"))
+    pages = builtin.clean(entry.get("pages"))
     if pages:
         item["page"] = pages.replace("--", "-")
-    doi = apa._clean(entry.get("doi"))
+    doi = builtin.clean(entry.get("doi"))
     if doi:
         item["DOI"] = re.sub(r"^https?://(dx\.)?doi\.org/", "", doi,
                              flags=re.IGNORECASE)
-    url = apa._clean(entry.get("url"))
+    url = builtin.clean(entry.get("url"))
     if url:
         item["URL"] = url
     issued = _year_parts(entry)

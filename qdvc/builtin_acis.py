@@ -13,8 +13,8 @@ Systems* and kindred IS outlets) differs from APA in several visible ways:
   * Journal articles show volume and issue as ``(vol:iss)`` and, where present,
     a DOI as ``(doi:…)`` in place of a page range.
 
-Like :mod:`apa`, this is a pragmatic formatter (not a full CSL engine) that
-produces two forms:
+Like :mod:`builtin_apa7`, this is a pragmatic formatter (not a full CSL engine)
+that produces two forms:
 
   * markup : Pango markup with ``<i>…</i>`` around titles/journals.
   * plain  : the same text with formatting stripped.
@@ -27,57 +27,30 @@ It also exposes an in-text citation renderer (``in_text_markup`` /
     Smith and Jones (2025a)         narrative (year only in parentheses)
 
 The disambiguation letter is supplied by the caller (the workspace knows which
-records share an author/year), so this module stays pure and stateless.
+records share an author/year), so this module stays pure and stateless. The
+style-agnostic primitives live in :mod:`builtin`.
 """
 
 import re
-from html import escape as _html_escape
 
-from . import apa
+from . import builtin
 
-
-def escape(text, quote=False):
-    """HTML-escape for Pango markup content.
-
-    Pango only requires ``&``, ``<`` and ``>`` to be escaped inside markup
-    text, so we default ``quote=False`` — this keeps apostrophes and straight
-    quotes literal, which matters both for names like "O'Brien" and so the
-    plain-text conversion (``apa.markup_to_plain``) round-trips cleanly.
-    """
-    return _html_escape(text, quote=quote)
+# ACIS escapes markup content with quotes off, so apostrophes/straight quotes
+# stay literal (matters for names like "O'Brien" and for a clean plain-text
+# round-trip via builtin.markup_to_plain).
+escape = builtin.escape
 
 # ---------------------------------------------------------------------------
 # Author handling
 # ---------------------------------------------------------------------------
-
-def _format_one_author(name: str) -> str:
-    """Return 'Surname, F. M.' for a single BibTeX author token.
-
-    ACIS keeps every author in surname-first order, so this is the same shape
-    the first APA author takes, applied to all of them.
-    """
-    name = name.replace("{", "").replace("}", "").strip()
-    if not name:
-        return ""
-    if "," in name:
-        last, _, first = name.partition(",")
-        last, first = last.strip(), first.strip()
-    else:
-        bits = name.split()
-        last = bits[-1]
-        first = " ".join(bits[:-1])
-    initials = apa._initials(first)
-    if initials:
-        return f"{last}, {initials}"
-    return last
-
 
 def format_author_list(raw: str) -> str:
     """ACIS author string: 'Smith, A., Jones, B. C., and Carter, D.'.
 
     Every author is surname-first; the final author is joined with ', and'.
     """
-    authors = [_format_one_author(a) for a in apa._split_authors(raw)]
+    authors = [builtin.surname_initials(a)
+               for a in builtin.split_authors(raw)]
     authors = [a for a in authors if a]
     if not authors:
         return ""
@@ -88,7 +61,7 @@ def format_author_list(raw: str) -> str:
 
 def _surnames(raw: str) -> list[str]:
     """Surnames only, in order, for in-text citations."""
-    return [surname for surname, _ in apa.author_tokens(raw or "")]
+    return [surname for surname, _ in builtin.author_tokens(raw or "")]
 
 
 # ---------------------------------------------------------------------------
@@ -101,9 +74,9 @@ _MONTHS = ["January", "February", "March", "April", "May", "June", "July",
 
 def _year_bare(entry: dict) -> str:
     """The four-digit year with no parentheses (empty string if unknown)."""
-    y = apa._clean(entry.get("year"))
+    y = builtin.clean(entry.get("year"))
     if not y:
-        date = apa._clean(entry.get("date"))
+        date = builtin.clean(entry.get("date"))
         m = re.match(r"(\d{4})", date)
         y = m.group(1) if m else ""
     return y
@@ -114,7 +87,7 @@ def _accessed_date(entry: dict) -> str:
 
     Falls back to the raw value when it is not an ISO ``YYYY-MM-DD`` date.
     """
-    raw = apa._clean(entry.get("urldate") or entry.get("accessed"))
+    raw = builtin.clean(entry.get("urldate") or entry.get("accessed"))
     if not raw:
         return ""
     m = re.match(r"(\d{4})-(\d{1,2})-(\d{1,2})", raw)
@@ -128,11 +101,11 @@ def _accessed_date(entry: dict) -> str:
 
 def _i(text: str) -> str:
     """Wrap in Pango italic markup, escaping the inner text."""
-    return f"<i>{escape(text, quote=False)}</i>" if text else ""
+    return builtin.italic(text, quote=False)
 
 
 def _doi(entry: dict) -> str:
-    doi = apa._clean(entry.get("doi"))
+    doi = builtin.clean(entry.get("doi"))
     if doi:
         return re.sub(r"^https?://(dx\.)?doi\.org/", "", doi,
                       flags=re.IGNORECASE)
@@ -163,11 +136,11 @@ def _lead(e: dict, disambiguator: str) -> str:
 
 
 def _render_article(e: dict, disambiguator: str) -> str:
-    title = apa._clean(e.get("title"))
-    journal = apa._clean(e.get("journal") or e.get("journaltitle"))
-    volume = apa._clean(e.get("volume"))
-    issue = apa._clean(e.get("number") or e.get("issue"))
-    pages = apa._clean(e.get("pages")).replace("--", "-")
+    title = builtin.clean(e.get("title"))
+    journal = builtin.clean(e.get("journal") or e.get("journaltitle"))
+    volume = builtin.clean(e.get("volume"))
+    issue = builtin.clean(e.get("number") or e.get("issue"))
+    pages = builtin.clean(e.get("pages")).replace("--", "-")
     doi = _doi(e)
 
     parts = [_lead(e, disambiguator)]
@@ -193,9 +166,9 @@ def _render_article(e: dict, disambiguator: str) -> str:
 
 
 def _render_inproceedings(e: dict, disambiguator: str) -> str:
-    title = apa._clean(e.get("title"))
-    book = apa._clean(e.get("booktitle"))
-    address = apa._clean(e.get("address") or e.get("location"))
+    title = builtin.clean(e.get("title"))
+    book = builtin.clean(e.get("booktitle"))
+    address = builtin.clean(e.get("address") or e.get("location"))
 
     parts = [_lead(e, disambiguator)]
     if title:
@@ -208,10 +181,10 @@ def _render_inproceedings(e: dict, disambiguator: str) -> str:
 
 
 def _render_book(e: dict, disambiguator: str) -> str:
-    title = apa._clean(e.get("title"))
-    edition = apa._clean(e.get("edition"))
-    publisher = apa._clean(e.get("publisher"))
-    address = apa._clean(e.get("address") or e.get("location"))
+    title = builtin.clean(e.get("title"))
+    edition = builtin.clean(e.get("edition"))
+    publisher = builtin.clean(e.get("publisher"))
+    address = builtin.clean(e.get("address") or e.get("location"))
 
     parts = [_lead(e, disambiguator)]
     t = _i(title) if title else ""
@@ -229,12 +202,12 @@ def _render_book(e: dict, disambiguator: str) -> str:
 
 
 def _render_inbook(e: dict, disambiguator: str) -> str:
-    title = apa._clean(e.get("title"))
-    book = apa._clean(e.get("booktitle"))
+    title = builtin.clean(e.get("title"))
+    book = builtin.clean(e.get("booktitle"))
     editor = format_author_list(e.get("editor", ""))
-    pages = apa._clean(e.get("pages")).replace("--", "-")
-    publisher = apa._clean(e.get("publisher"))
-    address = apa._clean(e.get("address") or e.get("location"))
+    pages = builtin.clean(e.get("pages")).replace("--", "-")
+    publisher = builtin.clean(e.get("publisher"))
+    address = builtin.clean(e.get("address") or e.get("location"))
 
     parts = [_lead(e, disambiguator)]
     if title:
@@ -256,8 +229,8 @@ def _render_inbook(e: dict, disambiguator: str) -> str:
 
 
 def _render_online(e: dict, disambiguator: str) -> str:
-    title = apa._clean(e.get("title"))
-    url = apa._clean(e.get("url")) or apa._clean(e.get("howpublished"))
+    title = builtin.clean(e.get("title"))
+    url = builtin.clean(e.get("url")) or builtin.clean(e.get("howpublished"))
     accessed = _accessed_date(e)
 
     parts = [_lead(e, disambiguator)]
@@ -292,10 +265,10 @@ _RENDERERS = {
 def _pick_renderer(entry: dict):
     """Choose a renderer, treating an ``incollection`` whose ``booktitle``
     begins with 'Proceedings of' as a conference paper (mirroring
-    ``apa.type_label``)."""
+    ``builtin.type_label``)."""
     etype = (entry.get("ENTRYTYPE") or entry.get("entrytype") or "misc").lower()
     if etype == "incollection":
-        booktitle = apa._clean(entry.get("booktitle"))
+        booktitle = builtin.clean(entry.get("booktitle"))
         if booktitle.lower().startswith("proceedings of"):
             return _render_inproceedings
     return _RENDERERS.get(etype, _render_online)
@@ -313,16 +286,11 @@ def format_acis_markup(entry: dict, disambiguator: str = "") -> str:
     an empty string when the reference is unambiguous.
     """
     renderer = _pick_renderer(entry)
-    markup = renderer(entry, disambiguator or "")
-    # Collapse artefacts from empty fields.
-    markup = re.sub(r"\s+\.", ".", markup)
-    markup = re.sub(r"\.\.", ".", markup)
-    markup = re.sub(r"\s{2,}", " ", markup).strip()
-    return markup
+    return builtin.collapse_artefacts(renderer(entry, disambiguator or ""))
 
 
 def format_acis_plain(entry: dict, disambiguator: str = "") -> str:
-    return apa.markup_to_plain(format_acis_markup(entry, disambiguator))
+    return builtin.markup_to_plain(format_acis_markup(entry, disambiguator))
 
 
 # ---------------------------------------------------------------------------
@@ -385,7 +353,7 @@ def _author_label(entry: dict) -> str:
     """
     surnames = _surnames(entry.get("author", "") or entry.get("editor", ""))
     if not surnames:
-        title = apa._clean(entry.get("title"))
+        title = builtin.clean(entry.get("title"))
         return title.split()[0] if title else ""
     if len(surnames) == 1:
         return surnames[0]

@@ -17,7 +17,7 @@ from .gtk3_widgets import (  # noqa: E402
     set_clipboard_rich as _set_clipboard_rich,
 )
 from .. import csl as csl_mod  # noqa: E402
-from .. import acis as acis_mod  # noqa: E402
+from .. import builtin_acis as acis_mod  # noqa: E402
 from ..catalogue_sort import (  # noqa: E402
     SORT_KEYS,
     count_label as _count_label,

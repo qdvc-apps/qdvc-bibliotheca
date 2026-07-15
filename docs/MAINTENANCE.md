@@ -22,7 +22,8 @@ files plus a fast in-memory index. Consequences:
 
 **Separation of concerns.** The top-level `qdvc/` package is **pure**,
 toolkit-independent logic with no GTK imports (`workspace.py`, `models.py`,
-`bibtex.py`, `markdown_io.py`, `naming.py`, `apa.py`, `acis.py`, `csl.py`,
+`bibtex.py`, `markdown_io.py`, `naming.py`, `builtin.py`, `builtin_apa7.py`,
+`builtin_acis.py`, `csl.py`,
 `catalogue_sort.py`, `config.py`, `platform_utils.py`). **All GTK3 code lives
 in the `qdvc/gtk3/` sub-package**, where every module is prefixed `gtk3_`. This
 split is what lets the model be unit-tested without a display (see §9), and it
@@ -78,8 +79,11 @@ qdvc/                       PURE package — no GTK imports anywhere here.
     bibtex.py              BibTeX parsing (+ fallback) and multi-entry split.
     markdown_io.py         Markdown / YAML-frontmatter read & write.
     naming.py              id / slug / nickname / DOI helpers.
-    apa.py                 BibTeX-entry -> APA 7 formatter (markup + plain).
-    acis.py                BibTeX-entry -> ACIS formatter (reference markup +
+    builtin.py             Shared primitives for the built-in formatters
+                           (author/name helpers, field cleaning, type labels,
+                           italic wrap, markup->plain).
+    builtin_apa7.py        BibTeX-entry -> APA 7 formatter (markup + plain).
+    builtin_acis.py        BibTeX-entry -> ACIS formatter (reference markup +
                            plain, plus in-text citation + disambiguation).
     csl.py                 Optional CSL renderer (via citeproc-py) + fallback.
     catalogue_sort.py      Pure sort-keys, count/label + J-Flag ordering helpers,
@@ -453,7 +457,7 @@ This is the subtle part. On every load:
 
 1. Load any existing `authors/*.yml` into a `persisted` map (this preserves the
    user's `starred` flags and the long-term id→name mapping).
-2. Walk all records; for each author token (via `apa.author_tokens`) compute
+2. Walk all records; for each author token (via `builtin.author_tokens`) compute
    `make_author_id`. Reuse the persisted `Author` if present, else create a new
    one.
 3. Build `_author_records: author_id -> [bibliotheca_id]` (guarding against an
@@ -483,7 +487,17 @@ Mirrors author derivation, with two twists:
 
 ---
 
-## 7. APA formatting (`apa.py`)
+## 7. Built-in reference formatting (`builtin.py`, `builtin_apa7.py`, `builtin_acis.py`)
+
+The two built-in styles share their primitives through **`builtin.py`** (pure):
+`split_authors`/`split_name`/`author_tokens`/`initials`/`surname_initials` for
+names, `clean` for field values, `escape`/`italic` for Pango markup content,
+`markup_to_plain` + `collapse_artefacts` for finishing, and the load-bearing
+`TYPE_LABELS`/`type_label`. The style modules only decide *how* those pieces are
+arranged. When a helper is needed by both styles (or by `csl.py`/`workspace.py`),
+it belongs in `builtin.py`, not in a style module.
+
+### 7.1 APA 7 (`builtin_apa7.py`)
 
 `format_apa_markup(entry)` returns **Pango markup** (`<i>…</i>` for titles/
 journals, entities escaped). `format_apa_plain(entry)` strips it to text.
@@ -491,32 +505,37 @@ journals, entities escaped). `format_apa_plain(entry)` strips it to text.
 - Type-specific renderers are registered in `_RENDERERS` keyed by entry type
   (article, inproceedings, book, inbook/incollection, online/misc, …), with
   `_render_online` as the fallback.
-- `TYPE_LABELS` / `type_label()` map BibTeX entry types to the human labels the
-  UI filters on ("Journal article", "Proceedings", "Book chapter", "Book",
-  "Webpage", "Other"). **These strings are load-bearing**: the sidebar "By
-  type" filter, `records_by_type`, and `Record.outlet` all compare against
-  them. Change them in one place only. `type_label(entrytype, booktitle=None)`
+- `TYPE_LABELS` / `type_label()` (defined in `builtin.py`, re-exported here for
+  back-compat) map BibTeX entry types to the human labels the UI filters on
+  ("Journal article", "Proceedings", "Book chapter", "Book", "Webpage",
+  "Other"). **These strings are load-bearing**: the sidebar "By type" filter,
+  `records_by_type`, and `Record.outlet` all compare against them. Change them
+  in one place (`builtin.py`) only. `type_label(entrytype, booktitle=None)`
   takes an optional booktitle so an `incollection` whose `booktitle` begins
   with "Proceedings of" is classed as "Proceedings" rather than "Book chapter";
   callers in `workspace._scan`/`import_bib_text` pass `e.get("booktitle")`.
-- Author name handling: `split_name` handles "Surname, Given" and
-  "Given Surname"; `author_tokens` returns `(surname, given)` pairs;
-  `format_author_list` builds the APA `A, B., & C.` string (≤20 authors, then
-  ellipsis rule).
+- Author name handling: `builtin.split_name` handles "Surname, Given" and
+  "Given Surname"; `builtin.author_tokens` returns `(surname, given)` pairs;
+  `builtin.surname_initials` builds one "Surname, F. M." token; APA's
+  `format_author_list` joins them into the `A, B., & C.` string (≤20 authors,
+  then the ellipsis rule). APA wraps italics with `quote=True` (its historical
+  behaviour); the `markup_to_plain` entity map covers the quote entities so it
+  still round-trips.
 
 The rich-vs-plain design exists to support the two Copy buttons and the
 HTML-clipboard path in the Catalogue (see §8.2).
 
-### 7.1 ACIS formatting (`acis.py`)
+### 7.2 ACIS (`builtin_acis.py`)
 
-A second built-in style, parallel to `apa.py`, selected via the `ACIS_STYLE_ID`
-sentinel (`"__acis__"`, defined in `catalogue_sort.py` beside `APA_STYLE_ID`).
-It differs from APA in visible ways: the year follows the authors with no
-parentheses and a trailing period; article/chapter titles are curly-quoted with
-the following comma *inside* the closing quote; every author stays
-surname-first and the final author is joined with ", and"; journal
-volume/issue render as `(vol:iss)`; a DOI renders as `(doi:…)` in place of a
-page range; and `@online` uses an `(url, accessed <D Month YYYY>)` tail.
+A second built-in style, parallel to `builtin_apa7.py`, selected via the
+`ACIS_STYLE_ID` sentinel (`"__acis__"`, defined in `catalogue_sort.py` beside
+`APA_STYLE_ID`). It differs from APA in visible ways: the year follows the
+authors with no parentheses and a trailing period; article/chapter titles are
+curly-quoted with the following comma *inside* the closing quote; every author
+stays surname-first (via `builtin.surname_initials`) and the final author is
+joined with ", and"; journal volume/issue render as `(vol:iss)`; a DOI renders
+as `(doi:…)` in place of a page range; and `@online` uses an
+`(url, accessed <D Month YYYY>)` tail.
 
 - `format_acis_markup(entry, disambiguator="")` / `format_acis_plain(...)`
   return the reference-list form (Pango markup / plain). Renderers are keyed by
@@ -526,16 +545,16 @@ page range; and `@online` uses an `(url, accessed <D Month YYYY>)` tail.
   `in_text_plain(...)` return the in-text citation: parenthetical
   `(Smith and Jones 2026)` / `(Thompson et al. 2026)` (three+ authors collapse
   to "et al."), or narrative `Smith and Jones (2026)` when `narrative=True`.
-- `escape()` is wrapped to default `quote=False`, so apostrophes/quotes stay
-  literal in markup content and survive the `markup_to_plain` round-trip.
+- ACIS wraps italics with `quote=False`, so apostrophes/quotes stay literal in
+  markup content and survive the `builtin.markup_to_plain` round-trip.
 
 **Disambiguation.** When two records share an author list and year, ACIS
-appends a letter (`2025a`, `2025b`). `acis.disambiguator_map(records)` groups by
-`(surnames, year)` using only the cached `Record` fields (no BibTeX parse) and
-assigns letters in title order. `Workspace.acis_disambiguator(record)` caches
-that map (keyed by record count, so it rebuilds after import/rescan) and returns
-the letter for one record; the Catalogue passes it into the `Record.acis_*`
-helpers so the reference and in-text forms stay consistent.
+appends a letter (`2025a`, `2025b`). `builtin_acis.disambiguator_map(records)`
+groups by `(surnames, year)` using only the cached `Record` fields (no BibTeX
+parse) and assigns letters in title order. `Workspace.acis_disambiguator(record)`
+caches that map (keyed by record count, so it rebuilds after import/rescan) and
+returns the letter for one record; the Catalogue passes it into the
+`Record.acis_*` helpers so the reference and in-text forms stay consistent.
 
 ---
 
@@ -793,7 +812,8 @@ There is no bundled GTK in many CI/sandbox environments, so two techniques are
 used:
 
 1. **Model tests** run directly — the entire pure layer (`workspace.py`,
-   `models.py`, `bibtex.py`, `markdown_io.py`, `naming.py`, `apa.py`, `csl.py`,
+   `models.py`, `bibtex.py`, `markdown_io.py`, `naming.py`, `builtin.py`,
+   `builtin_apa7.py`, `builtin_acis.py`, `csl.py`,
    `catalogue_sort.py`) imports no GTK, so you can build a temp workspace on
    disk and assert on `Workspace` behaviour (author/outlet derivation, import,
    rename, validate, full-text relative paths) without a display.
@@ -856,10 +876,11 @@ placeholder, not a crash).
   the dropdown + rendering in `catalogue_tab` (`_populate_style_combo`,
   `_reference_markup`); persistence in
   `MainWindow._saved_citation_style`/`_on_citation_style_chosen`.
-- **Add a BibTeX entry type / tweak APA** → `apa._RENDERERS`, `TYPE_LABELS`,
-  and `type_label` (which also inspects `booktitle` for the Proceedings case).
-  If you add a new human label, update `Record.outlet` and any By-type list.
-- **Tweak ACIS or its in-text citation** → `acis.py` (`_RENDERERS` /
+- **Add a BibTeX entry type / tweak APA** → `builtin_apa7._RENDERERS`; the
+  labels `TYPE_LABELS` / `type_label` live in `builtin.py` (which also inspects
+  `booktitle` for the Proceedings case). If you add a new human label, update
+  `Record.outlet` and any By-type list.
+- **Tweak ACIS or its in-text citation** → `builtin_acis.py` (`_RENDERERS` /
   `_pick_renderer` for the reference forms, `in_text_plain`/`_author_label` for
   the in-text forms, `disambiguator_map` for the year letters). The `Record`
   helpers (`acis_*`) and `Workspace.acis_disambiguator` are the integration
@@ -867,6 +888,10 @@ placeholder, not a crash).
   `_populate_style_combo`) lives in both `gtk3_catalogue_tab.py` and
   `gtk4_catalogue_tab.py`. Add any new built-in style id beside `ACIS_STYLE_ID`
   in `catalogue_sort.py`.
+- **Share a helper between the built-in styles** → put it in `builtin.py` (the
+  pure primitives layer) and call it from `builtin_apa7.py` / `builtin_acis.py`
+  (and from `csl.py` / `workspace.py` if they need it too). Don't reach across
+  from one style module into the other.
 - **Change the cached record schema** → update `Record`, `_scan`, `_load_index`,
   `_save_index`, and **bump `INDEX_VERSION`**.
 - **Add a menu/toolbar action** → the relevant `_*_menu`/`_build_toolbar`

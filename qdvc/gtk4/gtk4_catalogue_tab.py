@@ -27,7 +27,7 @@ from gi.repository import Gtk, Gdk, Gio, Pango, GObject, Adw  # noqa: E402
 
 from ..platform_utils import open_with_default_app, open_with_text_editor
 from .. import csl as csl_mod
-from .. import acis as acis_mod
+from .. import builtin_acis as acis_mod
 from ..catalogue_sort import (SORT_KEYS, count_label as _count_label,
                               order_jflags as _order_jflags,
                               markup_to_html as _markup_to_html,

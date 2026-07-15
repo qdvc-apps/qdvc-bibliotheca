@@ -81,13 +81,13 @@ The chosen interface is remembered in the config (`ui_backend`); the default is
 GTK 3. Either UI's Preferences window can switch to the other.
 
 To add it to your application menu and taskbar, see the desktop-launcher
-instructions in [MAINTENANCE.md](MAINTENANCE.md).
+instructions in [docs/MAINTENANCE.md](docs/MAINTENANCE.md).
 
 ## Documentation
 
-- **[MAINTENANCE.md](MAINTENANCE.md)** — architecture, module layout, data
+- **[docs/MAINTENANCE.md](docs/MAINTENANCE.md)** — architecture, module layout, data
   formats, and guidance for developing and maintaining the codebase.
-- **[MAINTENANCE_GTK3_GTK4.md](MAINTENANCE_GTK3_GTK4.md)** — an element-by-element
+- **[docs/MAINTENANCE_GTK3_GTK4.md](docs/MAINTENANCE_GTK3_GTK4.md)** — an element-by-element
   comparison of the GTK 3 and GTK 4 / libadwaita interfaces.
 
 ## License

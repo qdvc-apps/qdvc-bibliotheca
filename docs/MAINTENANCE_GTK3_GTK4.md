@@ -4,7 +4,8 @@ An element-by-element comparison of how **QDVC Bibliotheca**'s user interface is
 built in **GTK 3** (the `qdvc/gtk3/` package) versus **GTK 4 / libadwaita** (the
 `qdvc/gtk4/` package), and *why* each GTK4 choice was made. Both UIs sit on the
 same GTK-free core (`qdvc/workspace.py`, `models.py`, `bibtex.py`,
-`markdown_io.py`, `naming.py`, `apa.py`, `csl.py`, `catalogue_sort.py`,
+`markdown_io.py`, `naming.py`, `builtin.py`, `builtin_apa7.py`,
+`builtin_acis.py`, `csl.py`, `catalogue_sort.py`,
 `config.py`, `platform_utils.py`, and the shared `ui_prefs.py`); only the view
 layer differs. Neither front-end imports the other.
 
@@ -173,8 +174,11 @@ status line. GTK4 changes only the mechanics:
 - Notes use a `Gtk.TextView` + the shared `MarkdownHighlighter`
   (`gtk4_md_highlight`, a near-verbatim copy — the `Gtk.TextBuffer` tag APIs are
   identical across GTK3/4). Auto-save on record change is unchanged.
-- The reference label uses `set_wrap`/`set_wrap_mode` (GTK4 spelling) and the
-  APA-or-CSL rendering is the shared core (`apa` / `csl`).
+- The reference label uses `set_wrap`/`set_wrap_mode` (GTK4 spelling); the
+  built-in-or-CSL rendering is the shared core (`builtin_apa7` / `builtin_acis`
+  / `csl`), and the ACIS in-text row (`intext_box`) is wired identically in both
+  front-ends (`_render_intext`), differing only in show/hide spelling
+  (`set_visible` vs `hide`/`show` with `set_no_show_all`).
 
 ## The four secondary views (Authors / Outlets / DOI)
 

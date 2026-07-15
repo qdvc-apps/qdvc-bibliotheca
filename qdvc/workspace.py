@@ -29,7 +29,7 @@ from pathlib import Path
 
 import yaml
 
-from . import apa
+from . import builtin
 from .bibtex import parse_bibtex, parse_bib_fallback, split_bib_entries
 from .markdown_io import parse_markdown, write_markdown
 from .models import Record, MyWork, Author, Outlet
@@ -125,7 +125,7 @@ class Workspace:
         stays cheap for repeated Pane-3 lookups without going stale after an
         import or rescan.
         """
-        from . import acis
+        from . import builtin_acis as acis
         cache = getattr(self, "_acis_disambig_cache", None)
         stamp = len(self.records)
         if cache is None or cache[0] != stamp:
@@ -198,12 +198,12 @@ class Workspace:
                 bib_path=str(bib_file),
                 md_path=str(md) if md.exists() else str(md),
                 entrytype=(e.get("ENTRYTYPE") or "misc").lower(),
-                type_label=apa.type_label(e.get("ENTRYTYPE") or "misc",
+                type_label=builtin.type_label(e.get("ENTRYTYPE") or "misc",
                                           e.get("booktitle")),
-                author=apa._clean(e.get("author") or e.get("editor")),
-                year=apa._clean(e.get("year")),
-                title=apa._clean(e.get("title")),
-                journal=apa._clean(e.get("journal") or e.get("journaltitle")
+                author=builtin.clean(e.get("author") or e.get("editor")),
+                year=builtin.clean(e.get("year")),
+                title=builtin.clean(e.get("title")),
+                journal=builtin.clean(e.get("journal") or e.get("journaltitle")
                                    or e.get("booktitle")),
                 doi=_normalise_doi(e.get("doi")),
                 has_pdf=has_pdf,
@@ -356,7 +356,7 @@ class Workspace:
 
         for bid, rec in self.records.items():
             seen_in_this_record = set()
-            for surname, given in apa.author_tokens(rec.author):
+            for surname, given in builtin.author_tokens(rec.author):
                 aid = make_author_id(surname, given)
                 if not aid:
                     continue
@@ -665,12 +665,12 @@ class Workspace:
                 bib_path=str(dest),
                 md_path=str(self.md_path_for(bid)),
                 entrytype=(e.get("ENTRYTYPE") or "misc").lower(),
-                type_label=apa.type_label(e.get("ENTRYTYPE") or "misc",
+                type_label=builtin.type_label(e.get("ENTRYTYPE") or "misc",
                                           e.get("booktitle")),
-                author=apa._clean(e.get("author") or e.get("editor")),
-                year=apa._clean(e.get("year")),
-                title=apa._clean(e.get("title")),
-                journal=apa._clean(e.get("journal") or e.get("journaltitle")
+                author=builtin.clean(e.get("author") or e.get("editor")),
+                year=builtin.clean(e.get("year")),
+                title=builtin.clean(e.get("title")),
+                journal=builtin.clean(e.get("journal") or e.get("journaltitle")
                                    or e.get("booktitle")),
                 doi=_normalise_doi(e.get("doi")),
             )
